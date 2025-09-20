@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "ore_picker",
+  "version": "${version}",
+  "name": "Ore Picker",
+  "description": "",
+  "authors": [],
+  "contact": {},
+  "license": "MIT",
+  "icon": "assets/ore_picker/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "fabric-datagen": [
+      "net.misemise.ore_picker.client.Ore_pickerDataGenerator"
+    ],
+    "client": ["net.misemise.ore_picker.client.Ore_pickerClient"],
+    "main": ["net.misemise.ore_picker.Ore_picker"]
+  },
+  "mixins": [
+    "ore_picker.mixins.json",
+    {
+      "config": "ore_picker.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
