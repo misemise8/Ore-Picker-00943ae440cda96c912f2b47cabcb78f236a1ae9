@@ -31,20 +31,48 @@ public class AutoCollectHandler {
 
     private static Set<Block> makeWhitelist() {
         Set<Block> s = new HashSet<>();
+        // バニラ通常鉱石
         s.add(Blocks.COAL_ORE);
         s.add(Blocks.DIAMOND_ORE);
         s.add(Blocks.LAPIS_ORE);
         s.add(Blocks.NETHER_QUARTZ_ORE);
         s.add(Blocks.REDSTONE_ORE);
         s.add(Blocks.EMERALD_ORE);
+
+        // deepslate 系（1.17以降に追加された深層版。1.21.4 環境では定義されています）
+        try {
+            s.add(Blocks.DEEPSLATE_COAL_ORE);
+            s.add(Blocks.DEEPSLATE_DIAMOND_ORE);
+            s.add(Blocks.DEEPSLATE_LAPIS_ORE);
+            s.add(Blocks.DEEPSLATE_REDSTONE_ORE);
+            s.add(Blocks.DEEPSLATE_EMERALD_ORE);
+            // nether quartz に deepslate 版はないため追加していない
+        } catch (Throwable ignored) {
+            // 万が一古い環境で定数が無くてもコンパイル時に問題になることは稀ですが、
+            // 実行時はここで安全フォールバックします（ただし gradle の mappings/MCバージョン次第）。
+        }
+
         // iron/gold intentionally excluded (ユーザの要望によりXP付与しない)
         return s;
     }
 
     public static void collectDrops(World world, PlayerEntity player, BlockPos pos, BlockState state) {
-        System.out.println("[AutoCollectHandler] collectDrops called for player=" + (player != null ? player.getUuid() : "null") + " pos=" + pos + " block=" + (state != null ? state.getBlock().toString() : "null"));
+        System.out.println("[AutoCollectHandler] collectDrops called pos=" + pos + " block=" + (state != null ? state.getBlock().toString() : "null"));
+
         if (!(world instanceof ServerWorld serverWorld)) return;
         if (!(player instanceof ServerPlayerEntity serverPlayer)) return;
+
+        // 追加: 自動回収は「鉱石」に対してのみ行う
+        try {
+            if (!net.misemise.ore_picker.OreUtils.isOre(state)) {
+                // 鉱石でなければ何もしない
+                return;
+            }
+        } catch (Throwable t) {
+            // 判定で例外が出ても安全のため回収処理は行わない
+            t.printStackTrace();
+            return;
+        }
 
         boolean anyInserted = false;
 
@@ -138,12 +166,19 @@ public class AutoCollectHandler {
 
     private static int estimateXpForBlock(Block block, ServerWorld world) {
         Random rnd = new Random();
-        if (block == Blocks.COAL_ORE) return rnd.nextInt(3);
-        if (block == Blocks.DIAMOND_ORE) return 3 + rnd.nextInt(5);
-        if (block == Blocks.LAPIS_ORE) return 2 + rnd.nextInt(4);
-        if (block == Blocks.NETHER_QUARTZ_ORE) return 2 + rnd.nextInt(4);
-        if (block == Blocks.REDSTONE_ORE) return 1 + rnd.nextInt(3);
-        if (block == Blocks.EMERALD_ORE) return 2 + rnd.nextInt(3);
+
+        // 判定はブロック名に基づくヒューリスティック（deepslate 版にも対応）
+        String name = "";
+        try {
+            name = block.toString().toLowerCase();
+        } catch (Throwable ignored) {}
+
+        if (name.contains("coal")) return rnd.nextInt(3);
+        if (name.contains("diamond")) return 3 + rnd.nextInt(5);
+        if (name.contains("lapis")) return 2 + rnd.nextInt(4);
+        if (name.contains("quartz")) return 2 + rnd.nextInt(4);
+        if (name.contains("redstone")) return 1 + rnd.nextInt(3);
+        if (name.contains("emerald")) return 2 + rnd.nextInt(3);
         return 0;
     }
 }

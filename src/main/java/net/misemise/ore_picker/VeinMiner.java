@@ -32,6 +32,10 @@ public final class VeinMiner {
         if (world == null || player == null || originalState == null) return 0;
         Block target = originalState.getBlock();
         if (target == null) return 0;
+        if (!OreUtils.isOre(originalState)) {
+            // 開始ブロックが鉱石でないなら何もしない
+            return 0;
+        }
 
         // limit は「開始ブロックを含む合計上限」として扱う（呼び出し側は Config の maxVeinSize を渡す想定）
         // 実際の隣接探索では開始ブロック1つ分を予約するため -1 する
@@ -66,11 +70,20 @@ public final class VeinMiner {
                 BlockPos nn = p.add(d[0], d[1], d[2]);
                 if (visited.contains(nn)) continue;
                 visited.add(nn);
+
                 BlockState ns = world.getBlockState(nn);
-                if (ns != null && ns.getBlock() == target) {
+                if (ns == null) continue;
+
+                boolean sameType = ns.getBlock() == target;
+                boolean oreLike  = OreUtils.isOre(ns);
+
+                // 同種ブロックはこれまでどおり連結対象
+                // 設定で許可されていれば、異種でも鉱石判定なら連結する
+                if (sameType || (net.misemise.ore_picker.config.ConfigManager.INSTANCE.mergeDifferentOreTypes && oreLike)) {
                     q.add(nn);
                 }
             }
+
         }
 
         int broken = 0;
