@@ -19,6 +19,11 @@ import java.util.UUID;
  * - BFS で同種ブロックを探索し、limit を超えたら探索を停止する。
  * - 発見したブロックは破壊し（world.breakBlock）、CollectScheduler に
  *   allowVein=false でスケジュールする（派生収集のみ。再帰防止）。
+ *
+ * NOTE:
+ *   このメソッドの `limit` 引数は **「開始ブロックを含むトータル上限」** を想定しています。
+ *   実装上、開始ブロック（プレイヤーが最初に壊したブロック）は既に破壊済みであるため、
+ *   内部では隣接探索上限を `Math.max(0, limit - 1)` として扱います。
  */
 public final class VeinMiner {
     private VeinMiner() {}
@@ -27,7 +32,10 @@ public final class VeinMiner {
         if (world == null || player == null || originalState == null) return 0;
         Block target = originalState.getBlock();
         if (target == null) return 0;
-        if (limit <= 0) return 0;
+
+        // limit は「開始ブロックを含む合計上限」として扱う（呼び出し側は Config の maxVeinSize を渡す想定）
+        // 実際の隣接探索では開始ブロック1つ分を予約するため -1 する
+        int neighborLimit = Math.max(0, limit - 1);
 
         Deque<BlockPos> q = new ArrayDeque<>();
         Set<BlockPos> visited = new HashSet<>();
@@ -41,7 +49,7 @@ public final class VeinMiner {
             visited.add(n);
         }
 
-        while (!q.isEmpty() && toBreak.size() < limit) {
+        while (!q.isEmpty() && toBreak.size() < neighborLimit) {
             BlockPos p = q.poll();
             if (p == null) continue;
 
@@ -51,6 +59,7 @@ public final class VeinMiner {
 
             // record for break
             toBreak.add(p);
+            if (toBreak.size() >= neighborLimit) break;
 
             // enqueue neighbors (6-direction)
             for (int[] d : DIRS) {
