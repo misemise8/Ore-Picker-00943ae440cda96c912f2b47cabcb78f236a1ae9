@@ -15,6 +15,9 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.item.ItemStack; // ← 追加
+
+import net.misemise.ore_picker.config.ConfigManager;
 
 import java.util.Map;
 import java.util.UUID;
@@ -29,6 +32,14 @@ public class Ore_picker implements ModInitializer {
     @Override
     public void onInitialize() {
         System.out.println("[OrePicker] server initializing (logging-enabled)");
+
+        // Load config first (creates config/orepicker.properties if missing)
+        try {
+            ConfigManager.load();
+        } catch (Throwable t) {
+            System.err.println("[OrePicker] Failed to load config:");
+            t.printStackTrace();
+        }
 
         // register payload codec (server-side)
         try {
@@ -50,6 +61,7 @@ public class Ore_picker implements ModInitializer {
                 }
 
                 ServerPlayerEntity player = context.player();
+                if (player == null) return;
                 UUID uuid = player.getUuid();
                 playerHoldState.put(uuid, hold);
 
@@ -70,12 +82,9 @@ public class Ore_picker implements ModInitializer {
             try {
                 // we only schedule on server thread
                 if (!(world instanceof net.minecraft.server.world.ServerWorld serverWorld)) {
-                    // debug log for non-server calls
-                    //System.out.println("[OrePicker] AFTER event called on client side or non-server world.");
                     return;
                 }
                 if (!(player instanceof ServerPlayerEntity serverPlayer)) {
-                    //System.out.println("[OrePicker] AFTER event player is not server player.");
                     return;
                 }
 
@@ -86,8 +95,14 @@ public class Ore_picker implements ModInitializer {
                 if (!enabled) return;
 
                 // schedule for next tick
-                // ----- 修正点：最後の boolean 引数を追加 -----
-                CollectScheduler.schedule(serverWorld, pos, uuid, state, true);
+                // 安全にツールをコピーして渡す（null 安全）
+                ItemStack toolCopy = null;
+                try {
+                    ItemStack main = serverPlayer.getMainHandStack();
+                    if (main != null) toolCopy = main.copy();
+                } catch (Throwable ignored) {}
+
+                CollectScheduler.schedule(serverWorld, pos, uuid, state, true, toolCopy);
                 System.out.println("[OrePicker] Scheduled collect for next tick: " + pos + " for player " + uuid);
             } catch (Throwable t) {
                 t.printStackTrace();

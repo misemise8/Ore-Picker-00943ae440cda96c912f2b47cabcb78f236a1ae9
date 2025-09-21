@@ -21,26 +21,26 @@ import java.util.UUID;
  * VeinMiner:
  * - BFS で同種ブロックを探索し、limit を超えたら探索を停止する。
  * - 各ブロック破壊時に toolStack を利用して drop を生成する（可能な場合は Block.dropStacks を呼ぶ）。
- *
- * 変更点:
- * - 第7引数で toolStack を受け取り、drop 計算に渡します（Fortune/SilkTouch の正確な適用のため）。
  */
 public final class VeinMiner {
     private VeinMiner() {}
 
+    /**
+     * mineAndSchedule:
+     *  - limit: 開始ブロックを含む合計上限
+     *  - toolStack: スケジュール時にキャプチャしたツール（null 可）
+     */
     public static int mineAndSchedule(ServerWorld world, ServerPlayerEntity player, BlockPos startPos, BlockState originalState, UUID playerUuid, int limit, ItemStack toolStack) {
         if (world == null || player == null || originalState == null) return 0;
         Block target = originalState.getBlock();
         if (target == null) return 0;
 
-        // limit は「開始ブロックを含む合計上限」として扱う
         int neighborLimit = Math.max(0, limit - 1);
 
         Deque<BlockPos> q = new ArrayDeque<>();
         Set<BlockPos> visited = new HashSet<>();
         List<BlockPos> toBreak = new ArrayList<>();
 
-        // startPos 自身は既に破壊済みの前提なので隣接6方向から探索
         final int[][] DIRS = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
         for (int[] d : DIRS) {
             BlockPos n = startPos.add(d[0], d[1], d[2]);
@@ -78,33 +78,26 @@ public final class VeinMiner {
 
                 boolean dropped = false;
 
-                // 1) try to call Block.dropStacks(BlockState, World, BlockPos, BlockEntity, Entity, ItemStack)
+                // 1) try to call Block.dropStacks(...) via reflection passing toolStack where possible
                 try {
                     Class<?> blockClass = Class.forName("net.minecraft.block.Block");
                     Class<?> blockStateClass = Class.forName("net.minecraft.block.BlockState");
                     Class<?> worldClass = Class.forName("net.minecraft.world.World");
                     Class<?> blockPosClass = Class.forName("net.minecraft.util.math.BlockPos");
-                    Class<?> blockEntityClass;
-                    try {
-                        blockEntityClass = Class.forName("net.minecraft.block.entity.BlockEntity");
-                    } catch (ClassNotFoundException e) {
-                        blockEntityClass = null;
-                    }
+                    Class<?> blockEntityClass = null;
+                    try { blockEntityClass = Class.forName("net.minecraft.block.entity.BlockEntity"); } catch (Throwable ignored) {}
                     Class<?> entityClass = Class.forName("net.minecraft.entity.Entity");
                     Class<?> itemStackClass = Class.forName("net.minecraft.item.ItemStack");
 
-                    // try common static signature
                     Method dropStacksMethod = null;
                     try {
                         dropStacksMethod = blockClass.getMethod("dropStacks", blockStateClass, worldClass, blockPosClass, blockEntityClass, entityClass, itemStackClass);
                     } catch (Throwable ex) {
-                        // method not found with this exact signature - try overloaded variants via iteration
                         for (Method m : blockClass.getMethods()) {
                             if (!m.getName().equals("dropStacks")) continue;
                             Class<?>[] params = m.getParameterTypes();
-                            // prefer methods that accept at least (BlockState, World, BlockPos)
                             if (params.length >= 3) {
-                                if (params[0].getName().contains("BlockState") || params[0].getName().toLowerCase().contains("blockstate")) {
+                                if (params[0].getName().toLowerCase().contains("blockstate")) {
                                     dropStacksMethod = m;
                                     break;
                                 }
@@ -114,42 +107,36 @@ public final class VeinMiner {
 
                     if (dropStacksMethod != null) {
                         try {
-                            // prepare arguments in common order: (BlockState, World, BlockPos, BlockEntity, Entity, ItemStack)
                             Object be = null;
-                            Object[] args = null;
                             Class<?>[] params = dropStacksMethod.getParameterTypes();
-                            args = new Object[params.length];
+                            Object[] args = new Object[params.length];
                             for (int i = 0; i < params.length; i++) {
                                 String pn = params[i].getName().toLowerCase();
                                 if (pn.contains("blockstate")) args[i] = currentState;
                                 else if (pn.contains("world")) args[i] = (Object) world;
-                                else if (pn.contains("blockpos") || pn.contains("blockpos")) args[i] = p;
+                                else if (pn.contains("blockpos")) args[i] = p;
                                 else if (pn.contains("blockentity")) args[i] = null;
                                 else if (pn.contains("entity")) args[i] = player;
-                                else if (pn.contains("itemstack") || pn.contains("itemstack")) args[i] = toolStack;
+                                else if (pn.contains("itemstack")) args[i] = toolStack;
                                 else args[i] = null;
                             }
 
-                            // static method: invoke null; instance method: invoke currentState.getBlock()
                             if ((dropStacksMethod.getModifiers() & java.lang.reflect.Modifier.STATIC) != 0) {
                                 dropStacksMethod.invoke(null, args);
                             } else {
                                 Object blockObj = currentState.getBlock();
                                 dropStacksMethod.invoke(blockObj, args);
                             }
-
                             dropped = true;
                         } catch (Throwable exInvoke) {
-                            // fall through to fallback
                             dropped = false;
                         }
                     }
                 } catch (Throwable reflectionEx) {
-                    // ignore and fallback
                     dropped = false;
                 }
 
-                // 2) fallback: try to break via world.breakBlock with temporary swap (older method)
+                // 2) fallback: temporarily swap player's main hand and call world.breakBlock
                 if (!dropped) {
                     ItemStack originalMain = null;
                     Integer selectedSlot = null;
@@ -184,26 +171,20 @@ public final class VeinMiner {
                     try {
                         world.breakBlock(p, true, player);
                     } catch (Throwable ex2) {
-                        try {
-                            world.setBlockState(p, Blocks.AIR.getDefaultState(), 3);
-                        } catch (Throwable ignored) {}
+                        try { world.setBlockState(p, Blocks.AIR.getDefaultState(), 3); } catch (Throwable ignored) {}
                     }
 
                     if (swapped && selectedSlot != null) {
-                        try {
-                            player.getInventory().setStack(selectedSlot, originalMain);
-                        } catch (Throwable ignored) {}
+                        try { player.getInventory().setStack(selectedSlot, originalMain); } catch (Throwable ignored) {}
                     }
                 } else {
-                    // if we used dropStacks, still remove the block to avoid duplicates
-                    try {
-                        world.setBlockState(p, Blocks.AIR.getDefaultState(), 3);
-                    } catch (Throwable ignored) {}
+                    // remove the block to avoid duplicates
+                    try { world.setBlockState(p, Blocks.AIR.getDefaultState(), 3); } catch (Throwable ignored) {}
                 }
 
-                // schedule collect for the broken block to pick up its drops (allowVein=false to avoid recursion)
+                // schedule collect for the broken block to pick up its drops (pass toolStack)
                 try {
-                    CollectScheduler.schedule(world, p, playerUuid, originalState, false);
+                    CollectScheduler.schedule(world, p, playerUuid, originalState, false, toolStack);
                 } catch (Throwable ignored) {}
 
                 broken++;

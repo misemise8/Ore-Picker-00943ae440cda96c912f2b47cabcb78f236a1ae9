@@ -24,7 +24,9 @@ import java.util.HashSet;
  * AutoCollectHandler:
  * - 近接にスポーンした ItemEntity をプレイヤーのインベントリへ挿入（成功した分はエンティティ削除）
  * - 経験値はホワイトリストに基づいてのみプレイヤーへ直接付与（オーブは生成しない）
- * - Silk Touch を使っている場合は XP を与えない（vanilla 準拠）
+ * - Silk Touch を使っている場合は XP を与えない（toolStack を優先して判定）
+ *
+ * デバッグ: hasSilkTouch 判定と toolStack の NBT をログに出すようにしている。
  */
 public class AutoCollectHandler {
     // 簡易ホワイトリスト（必要なら ConfigManager 経由に拡張可能）
@@ -33,72 +35,99 @@ public class AutoCollectHandler {
     private static Set<Block> makeWhitelist() {
         Set<Block> s = new HashSet<>();
         // バニラ通常鉱石
-        s.add(Blocks.COAL_ORE);
-        s.add(Blocks.DIAMOND_ORE);
-        s.add(Blocks.LAPIS_ORE);
-        s.add(Blocks.NETHER_QUARTZ_ORE);
-        s.add(Blocks.REDSTONE_ORE);
-        s.add(Blocks.EMERALD_ORE);
+        try {
+            s.add(Blocks.COAL_ORE);
+            s.add(Blocks.DIAMOND_ORE);
+            s.add(Blocks.LAPIS_ORE);
+            s.add(Blocks.NETHER_QUARTZ_ORE);
+            s.add(Blocks.REDSTONE_ORE);
+            s.add(Blocks.EMERALD_ORE);
+        } catch (Throwable e1) {}
 
-        // deepslate 系（1.17以降に追加された深層版。1.21.4 環境では定義されています）
+        // deepslate 系（存在すれば追加）
         try {
             s.add(Blocks.DEEPSLATE_COAL_ORE);
             s.add(Blocks.DEEPSLATE_DIAMOND_ORE);
             s.add(Blocks.DEEPSLATE_LAPIS_ORE);
             s.add(Blocks.DEEPSLATE_REDSTONE_ORE);
             s.add(Blocks.DEEPSLATE_EMERALD_ORE);
-            // nether quartz に deepslate 版はないため追加していない
-        } catch (Throwable ignored) {
-            // 万が一古い環境で定数が無くても実行時に安全フォールバック
-        }
+        } catch (Throwable e2) {}
 
-        // iron/gold intentionally excluded (ユーザの要望によりXP付与しない)
+        // iron/gold intentionally excluded
         return s;
     }
 
+    // 互換オーバーロード（旧4引数）
     public static void collectDrops(World world, PlayerEntity player, BlockPos pos, BlockState state) {
+        ItemStack toolCopy = null;
+        try {
+            ItemStack main = player.getMainHandStack();
+            if (main != null) toolCopy = main.copy();
+        } catch (Throwable e3) {}
+        collectDrops(world, player, pos, state, toolCopy);
+    }
+
+    /**
+     * 新しいシグネチャ: toolStack を優先して SilkTouch 判定を行う
+     */
+    public static void collectDrops(World world, PlayerEntity player, BlockPos pos, BlockState state, ItemStack toolStack) {
         System.out.println("[AutoCollectHandler] collectDrops called pos=" + pos + " block=" + (state != null ? state.getBlock().toString() : "null"));
 
         if (!(world instanceof ServerWorld serverWorld)) return;
         if (!(player instanceof ServerPlayerEntity serverPlayer)) return;
 
-        // 追加: 自動回収は「鉱石」に対してのみ行う（OreUtilsを導入済み）
+        // 自動回収は「鉱石」に対してのみ行う
         try {
             if (!net.misemise.ore_picker.OreUtils.isOre(state)) {
                 return;
             }
-        } catch (Throwable t) {
-            t.printStackTrace();
+        } catch (Throwable e4) {
+            e4.printStackTrace();
             return;
         }
 
-        // ---------- Silk Touch check (reflection/NBT-based, mapping-safe) ----------
+        // ---------- Silk Touch 判定（toolStack 優先） ----------
         boolean hasSilkTouch = false;
         try {
-            try {
-                ItemStack main = serverPlayer.getMainHandStack();
-                if (main != null && stackHasSilkTouchViaNbt(main)) hasSilkTouch = true;
-            } catch (Throwable ignored) {}
+            if (toolStack != null) {
+                try {
+                    System.out.println("[AutoCollectHandler][DEBUG] received toolStack = " + toolStack.toString());
+                } catch (Throwable e5) {}
+                if (robustHasSilkTouch(toolStack)) hasSilkTouch = true;
+            }
+            if (!hasSilkTouch) {
+                try {
+                    ItemStack main = serverPlayer.getMainHandStack();
+                    if (main != null) {
+                        try { System.out.println("[AutoCollectHandler][DEBUG] player's mainHand = " + main.toString()); } catch (Throwable e6) {}
+                        if (robustHasSilkTouch(main)) hasSilkTouch = true;
+                    }
+                } catch (Throwable e7) {}
+            }
             if (!hasSilkTouch) {
                 try {
                     ItemStack off = serverPlayer.getOffHandStack();
-                    if (off != null && stackHasSilkTouchViaNbt(off)) hasSilkTouch = true;
-                } catch (Throwable ignored) {}
+                    if (off != null) {
+                        try { System.out.println("[AutoCollectHandler][DEBUG] player's offHand = " + off.toString()); } catch (Throwable e8) {}
+                        if (robustHasSilkTouch(off)) hasSilkTouch = true;
+                    }
+                } catch (Throwable e9) {}
             }
-        } catch (Throwable ignored) {}
-        // -------------------------------------------------------------------------
+        } catch (Throwable e10) {}
+        // --------------------------------------------------------
+
+        System.out.println("[AutoCollectHandler][DEBUG] hasSilkTouch=" + hasSilkTouch);
 
         boolean anyInserted = false;
 
         // 1) アイテム回収
         try {
             double radius = 1.5d;
-            // pickupRadius を config に合わせたい場合は ConfigManager.INSTANCE.pickupRadius を参照
             try {
                 if (net.misemise.ore_picker.config.ConfigManager.INSTANCE != null) {
                     radius = net.misemise.ore_picker.config.ConfigManager.INSTANCE.pickupRadius;
                 }
-            } catch (Throwable ignored) {}
+            } catch (Throwable e11) {}
 
             Box box = new Box(pos.getX() - radius, pos.getY() - radius, pos.getZ() - radius,
                     pos.getX() + radius, pos.getY() + radius, pos.getZ() + radius);
@@ -115,16 +144,16 @@ public class AutoCollectHandler {
                         anyInserted = true;
                         try {
                             ie.remove(net.minecraft.entity.Entity.RemovalReason.DISCARDED);
-                        } catch (Throwable ex) {
-                            try { ie.discard(); } catch (Throwable ignored) {}
+                        } catch (Throwable e12) {
+                            try { ie.discard(); } catch (Throwable e13) {}
                         }
                     }
                 } catch (Throwable exItem) {
                     exItem.printStackTrace();
                 }
             }
-        } catch (Throwable t) {
-            t.printStackTrace();
+        } catch (Throwable e14) {
+            e14.printStackTrace();
         }
 
         // 2) 回収音
@@ -133,7 +162,7 @@ public class AutoCollectHandler {
                 serverWorld.playSound(null,
                         player.getX(), player.getY(), player.getZ(),
                         SoundEvents.ENTITY_ITEM_PICKUP, SoundCategory.PLAYERS, 0.2f, 1.0f);
-            } catch (Throwable ignored) {}
+            } catch (Throwable e15) {}
         }
 
         // 3) XP（ホワイトリスト判定 + フォールバック）
@@ -151,17 +180,17 @@ public class AutoCollectHandler {
                                 xp = estimateXpForBlock(blk, serverWorld);
                             }
                         } catch (ClassNotFoundException cnfe) {
-                            // フォールバックで0
-                        } catch (Throwable ignored) {}
+                        } catch (Throwable e16) {}
                     }
-                } catch (Throwable ignored) {}
+                } catch (Throwable e17) {}
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable e18) {
             xp = 0;
         }
 
         // Silk Touch: バニラに合わせて XP は与えない
         if (hasSilkTouch) {
+            System.out.println("[AutoCollectHandler][DEBUG] silkTouch detected -> xp set to 0");
             xp = 0;
         }
 
@@ -175,20 +204,22 @@ public class AutoCollectHandler {
                 for (ExperienceOrbEntity orb : orbs) {
                     try {
                         orb.remove(net.minecraft.entity.Entity.RemovalReason.DISCARDED);
-                    } catch (Throwable ex) {
-                        try { orb.discard(); } catch (Throwable ignored) {}
+                    } catch (Throwable e19) {
+                        try { orb.discard(); } catch (Throwable e20) {}
                     }
                 }
-            } catch (Throwable ignored) {}
+            } catch (Throwable e21) {}
 
             // プレイヤーへ直接付与
             try {
+                // デバッグ: 与える xp をログ出力
+                System.out.println("[AutoCollectHandler][DEBUG] awarding xp=" + xp + " to player=" + serverPlayer.getGameProfile().getName());
                 serverPlayer.addExperience(xp);
                 try {
                     serverWorld.playSound(null,
                             player.getX(), player.getY(), player.getZ(),
                             SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, SoundCategory.PLAYERS, 0.3f, 1.0f);
-                } catch (Throwable ignored) {}
+                } catch (Throwable e22) {}
             } catch (Throwable t) {
                 // addExperience が環境で無い等は無視
             }
@@ -198,166 +229,130 @@ public class AutoCollectHandler {
         try {
             String blockIdString = state.getBlock().toString();
             VeinMineTracker.increment(serverPlayer.getUuid(), blockIdString);
-        } catch (Throwable ignored) {}
+        } catch (Throwable e23) {}
     }
 
     /**
-     * リフレクションで ItemStack の NBT を読み、Enchantments リストに silk_touch を含むかを調べる。
-     * - 互換性確保のため getNbt / getTag 等の異なるメソッド名を順に試す。
-     * - 見つからなければ false を返す（Silk Touch を検出できない限り XP を与える動作になる）。
+     * Silk Touch 検出をより頑健に行うヘルパー。
+     * - NBT・enchant list の取り方を複数試す
+     * - 最終フォールバックで toString() に "silk_touch" 等が含まれていないかを確認
      */
-    private static boolean stackHasSilkTouchViaNbt(ItemStack st) {
+    private static boolean robustHasSilkTouch(ItemStack st) {
         if (st == null) return false;
         try {
-            // try multiple possible method names for retrieving NBT: getNbt, getTag, toTag, getOrCreateNbt
+            // 1) try multiple "get nbt" method names
             Object nbt = null;
-            String[] candidates = new String[] {"getNbt", "getTag", "toTag", "getOrCreateNbt"};
-            for (String mname : candidates) {
+            String[] nbtNames = new String[] {"getNbt", "getTag", "toTag", "getOrCreateNbt"};
+            for (String name : nbtNames) {
                 try {
-                    java.lang.reflect.Method m = st.getClass().getMethod(mname);
+                    java.lang.reflect.Method m = st.getClass().getMethod(name);
                     if (m != null) {
                         nbt = m.invoke(st);
                         if (nbt != null) break;
                     }
-                } catch (NoSuchMethodException nsme) {
-                    // try next
+                } catch (Throwable e24) {}
+            }
+
+            // 2) try to retrieve enchantment list from nbt or stack
+            Object enchList = null;
+            if (nbt != null) {
+                try {
+                    java.lang.reflect.Method getList = nbt.getClass().getMethod("getList", String.class, int.class);
+                    enchList = getList.invoke(nbt, "Enchantments", 10);
+                } catch (Throwable e25) {}
+                if (enchList == null) {
+                    try {
+                        java.lang.reflect.Method getM = nbt.getClass().getMethod("get", String.class);
+                        enchList = getM.invoke(nbt, "Enchantments");
+                    } catch (Throwable e26) {}
                 }
             }
-            if (nbt == null) return false;
 
-            // try to get the enchantments list: getList("Enchantments", 10)
-            java.lang.reflect.Method getListMethod = null;
-            try {
-                getListMethod = nbt.getClass().getMethod("getList", String.class, int.class);
-            } catch (NoSuchMethodException nsme) {
-                // maybe method name differs; try "get" then check type
+            if (enchList == null) {
+                // try direct methods on ItemStack that some mappings provide
                 try {
-                    java.lang.reflect.Method getMethod = nbt.getClass().getMethod("get", String.class);
-                    Object maybe = getMethod.invoke(nbt, "Enchantments");
-                    if (maybe == null) return false;
-                    // if maybe has size() / getCompound(int) we'll treat it like a list
-                    // set listObj to maybe
-                    Object listObj = maybe;
-                    int size = 0;
-                    try {
-                        java.lang.reflect.Method sizeM = listObj.getClass().getMethod("size");
-                        size = ((Number)sizeM.invoke(listObj)).intValue();
-                    } catch (NoSuchMethodException e) {
-                        return false;
+                    java.lang.reflect.Method m = st.getClass().getMethod("getEnchantments");
+                    enchList = m.invoke(st);
+                } catch (Throwable e27) {}
+                try {
+                    if (enchList == null) {
+                        java.lang.reflect.Method m2 = st.getClass().getMethod("getEnchantmentTags");
+                        enchList = m2.invoke(st);
                     }
+                } catch (Throwable e28) {}
+            }
+
+            if (enchList != null) {
+                // try indexed access
+                try {
+                    java.lang.reflect.Method sizeM = enchList.getClass().getMethod("size");
+                    int size = ((Number) sizeM.invoke(enchList)).intValue();
                     for (int i = 0; i < size; i++) {
                         try {
-                            java.lang.reflect.Method getCompound = listObj.getClass().getMethod("getCompound", int.class);
-                            Object comp = getCompound.invoke(listObj, i);
-                            if (comp == null) continue;
-                            java.lang.reflect.Method getString = comp.getClass().getMethod("getString", String.class);
-                            String id = (String) getString.invoke(comp, "id");
-                            if (id != null && id.toLowerCase().contains("silk_touch")) return true;
-                        } catch (NoSuchMethodException ex2) {
-                            // try generic get(int)
+                            Object comp = null;
                             try {
-                                java.lang.reflect.Method getM = listObj.getClass().getMethod("get", int.class);
-                                Object comp = getM.invoke(listObj, i);
-                                if (comp == null) continue;
-                                java.lang.reflect.Method getString = comp.getClass().getMethod("getString", String.class);
-                                String id = (String) getString.invoke(comp, "id");
-                                if (id != null && id.toLowerCase().contains("silk_touch")) return true;
-                            } catch (Throwable ignored) {}
-                        } catch (Throwable ignored) {}
+                                java.lang.reflect.Method getCompound = enchList.getClass().getMethod("getCompound", int.class);
+                                comp = getCompound.invoke(enchList, i);
+                            } catch (Throwable e29) {
+                                try {
+                                    java.lang.reflect.Method getM = enchList.getClass().getMethod("get", int.class);
+                                    comp = getM.invoke(enchList, i);
+                                } catch (Throwable e30) {}
+                            }
+                            if (comp == null) continue;
+                            String id = null;
+                            try {
+                                java.lang.reflect.Method gs = comp.getClass().getMethod("getString", String.class);
+                                id = (String) gs.invoke(comp, "id");
+                                if (id == null || id.isEmpty()) id = (String) gs.invoke(comp, "Id");
+                            } catch (Throwable e31) {}
+                            if (id != null && id.toLowerCase().contains("silk_touch")) return true;
+                        } catch (Throwable e32) {}
                     }
-                    return false;
-                } catch (NoSuchMethodException | IllegalAccessException ex) {
-                    return false;
+                } catch (Throwable e33) {
+                    // fallback to toString search
+                    try {
+                        String s = enchList.toString().toLowerCase();
+                        if (s.contains("silk_touch") || s.contains("silktouch") || s.contains("silk-touch")) return true;
+                    } catch (Throwable e34) {}
                 }
             }
 
-            // if getListMethod exists
-            Object enchList = getListMethod.invoke(nbt, "Enchantments", 10);
-            if (enchList == null) return false;
-            int size = 0;
-            try {
-                java.lang.reflect.Method sizeM = enchList.getClass().getMethod("size");
-                size = ((Number)sizeM.invoke(enchList)).intValue();
-            } catch (NoSuchMethodException ns) {
-                return false;
-            }
-            for (int i = 0; i < size; i++) {
+            // final fallback: stringify entire nbt or stack
+            if (nbt != null) {
                 try {
-                    java.lang.reflect.Method getCompound = enchList.getClass().getMethod("getCompound", int.class);
-                    Object comp = getCompound.invoke(enchList, i);
-                    if (comp == null) continue;
-                    java.lang.reflect.Method getString = comp.getClass().getMethod("getString", String.class);
-                    String id = (String) getString.invoke(comp, "id");
-                    if (id != null && id.toLowerCase().contains("silk_touch")) return true;
-                } catch (NoSuchMethodException ex2) {
-                    try {
-                        java.lang.reflect.Method getM = enchList.getClass().getMethod("get", int.class);
-                        Object comp = getM.invoke(enchList, i);
-                        if (comp == null) continue;
-                        java.lang.reflect.Method getString = comp.getClass().getMethod("getString", String.class);
-                        String id = (String) getString.invoke(comp, "id");
-                        if (id != null && id.toLowerCase().contains("silk_touch")) return true;
-                    } catch (Throwable ignored) {}
-                } catch (Throwable ignored) {}
+                    String s = nbt.toString().toLowerCase();
+                    if (s.contains("silk_touch") || s.contains("silktouch")) return true;
+                } catch (Throwable e35) {}
             }
 
-        } catch (Throwable ignored) {
-            // anything goes wrong -> assume no silk touch
-            return false;
-        }
+            try {
+                String s2 = st.toString().toLowerCase();
+                if (s2.contains("silk_touch") || s2.contains("silktouch")) return true;
+            } catch (Throwable e36) {}
+        } catch (Throwable e37) {}
         return false;
     }
 
     private static int estimateXpForBlock(Block block, ServerWorld world) {
         Random rnd = new Random();
-
-        // 名前ベース判定（deepslate 版にも対応）
         String name = "";
-        try {
-            name = block.toString().toLowerCase();
-        } catch (Throwable ignored) {}
+        try { name = block.toString().toLowerCase(); } catch (Throwable e38) {}
 
-        // 明示的に XP を与えたくないもの（iron/gold は除外）
-        if (name.contains("iron") || name.contains("gold")) {
-            return 0;
-        }
+        if (name.contains("iron") || name.contains("gold")) return 0;
+        if (name.contains("coal")) return rnd.nextInt(3); // 0-2
+        if (name.contains("diamond")) return 3 + rnd.nextInt(5); // 3-7
+        if (name.contains("lapis")) return 2 + rnd.nextInt(4); // 2-5
+        if (name.contains("quartz")) return 2 + rnd.nextInt(4); // 2-5
+        if (name.contains("redstone")) return 1 + rnd.nextInt(5); // 1-5
+        if (name.contains("emerald")) return 3 + rnd.nextInt(5); // 3-7
 
-        // バニラの範囲に合わせる
-        if (name.contains("coal")) {
-            // 0 - 2
-            return rnd.nextInt(3);
-        }
-        if (name.contains("diamond")) {
-            // 3 - 7
-            return 3 + rnd.nextInt(5);
-        }
-        if (name.contains("lapis")) {
-            // 2 - 5
-            return 2 + rnd.nextInt(4);
-        }
-        if (name.contains("quartz")) {
-            // Nether quartz: 2 - 5
-            return 2 + rnd.nextInt(4);
-        }
-        if (name.contains("redstone")) {
-            // 1 - 5 (vanilla range)
-            return 1 + rnd.nextInt(5);
-        }
-        if (name.contains("emerald")) {
-            // 3 - 7 (vanilla range)
-            return 3 + rnd.nextInt(5);
-        }
-
-        // フォールバック: ExperienceDroppingBlock を継承している mod 鉱石は
-        // リフレクションで確認して、小さめのデフォルトXPを与える（1-3）
         try {
             Class<?> edClass = Class.forName("net.minecraft.block.ExperienceDroppingBlock");
             if (edClass.isAssignableFrom(block.getClass())) {
-                return 1 + rnd.nextInt(3); // 1 - 3
+                return 1 + rnd.nextInt(3);
             }
-        } catch (ClassNotFoundException cnfe) {
-            // クラスが無ければ何もしない（安全フォールバック）
-        } catch (Throwable ignored) {}
+        } catch (Throwable e39) {}
 
         return 0;
     }

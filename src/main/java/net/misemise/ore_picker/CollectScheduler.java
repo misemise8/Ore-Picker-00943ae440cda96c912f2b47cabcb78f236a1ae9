@@ -41,26 +41,37 @@ public final class CollectScheduler {
     }
 
     /**
-     * スケジュールする。呼び出し元は world/playerUuid/pos/state を渡す。
-     * ここで可能であればプレイヤーを解決して main hand のコピーを取る（Fortune の安定適用用）。
+     * 既存互換: ツールキャプチャは内部で試行する
      */
     public static void schedule(ServerWorld world, BlockPos pos, UUID playerUuid, BlockState state, boolean allowVein) {
+        schedule(world, pos, playerUuid, state, allowVein, null);
+    }
+
+    /**
+     * ツールを明示してスケジュールする場合はこちら。
+     * providedToolStack が null の場合は呼び出し時にプレイヤーの手をキャプチャします（可能ならコピー）。
+     */
+    public static void schedule(ServerWorld world, BlockPos pos, UUID playerUuid, BlockState state, boolean allowVein, ItemStack providedToolStack) {
         if (world == null || pos == null || playerUuid == null) return;
 
         ItemStack toolCopy = null;
-        try {
-            if (world.getServer() != null) {
-                try {
-                    ServerPlayerEntity p = world.getServer().getPlayerManager().getPlayer(playerUuid);
-                    if (p != null) {
-                        try {
-                            ItemStack main = p.getMainHandStack();
-                            if (main != null) toolCopy = main.copy();
-                        } catch (Throwable ignored) {}
-                    }
-                } catch (Throwable ignored) {}
-            }
-        } catch (Throwable ignored) {}
+        if (providedToolStack != null) {
+            try { toolCopy = providedToolStack.copy(); } catch (Throwable ignored) { toolCopy = providedToolStack; }
+        } else {
+            try {
+                if (world.getServer() != null) {
+                    try {
+                        ServerPlayerEntity p = world.getServer().getPlayerManager().getPlayer(playerUuid);
+                        if (p != null) {
+                            try {
+                                ItemStack main = p.getMainHandStack();
+                                if (main != null) toolCopy = main.copy();
+                            } catch (Throwable ignored) {}
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            } catch (Throwable ignored) {}
+        }
 
         PENDING.add(new ScheduledCollect(world, pos, state, playerUuid, allowVein, toolCopy));
         try {
@@ -115,7 +126,8 @@ public final class CollectScheduler {
 
         try {
             if (sc.state != null && sc.world != null && player != null) {
-                AutoCollectHandler.collectDrops(sc.world, player, sc.pos, sc.state);
+                // toolStack を渡して AutoCollect を呼ぶ
+                AutoCollectHandler.collectDrops(sc.world, player, sc.pos, sc.state, sc.toolStack);
             }
         } catch (Throwable t) {
             t.printStackTrace();
@@ -134,7 +146,6 @@ public final class CollectScheduler {
                 int limit = Math.max(0, configured);
 
                 try {
-                    // ツールコピーを渡して Fortune 等を安定させる
                     int broken = VeinMiner.mineAndSchedule(sc.world, player, sc.pos, sc.state, sc.playerUuid, limit, sc.toolStack);
                     try {
                         System.out.println("[CollectScheduler] Vein broken: " + broken + " " + (sc.state != null ? sc.state.getBlock().toString() : "unknown"));
