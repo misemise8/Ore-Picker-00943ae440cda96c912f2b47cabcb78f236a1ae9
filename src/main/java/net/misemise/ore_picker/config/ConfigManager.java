@@ -1,143 +1,207 @@
 package net.misemise.ore_picker.config;
 
-import java.io.*;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Arrays;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.List;
 import java.util.Properties;
-import java.util.stream.Collectors;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 
 /**
- * ConfigManager:
- * - 起動時に config/orepicker.properties を読み込んで ModConfig.INSTANCE に反映します。
- * - ファイルがなければデフォルトを作成して書き出します。
+ * ConfigManager
  *
- * ファイル形式（properties）:
- *   maxVeinSize=64
- *   maxVeinSizeCap=512
- *   mergeDifferentOreTypes=false
- *   autoCollectEnabled=true
- *   pickupRadius=1.5
- *   extraOreBlocks=modid:ore1,othermod:ore2
- *   debug=false
+ * - シンプルな properties ベースの設定管理
+ * - 起動時に config/orepicker.properties を作成/読み込み
+ * - ファイル変更を WatchService で監視し、変更時に自動リロード
  */
 public final class ConfigManager {
-    public static ModConfig INSTANCE = new ModConfig();
+    public static volatile ConfigManager INSTANCE = null;
 
-    private ConfigManager() {}
+    public int maxVeinSize = 64;
+    public int maxVeinSizeCap = 512;
+    public boolean mergeDifferentOreTypes = false;
+    public boolean autoCollectEnabled = true;
+    public double pickupRadius = 1.5d;
+    public String extraOreBlocks = "";
+    public boolean debug = false;
 
-    public static void load() {
-        Path cfgDir = Path.of("config");
-        Path cfgFile = cfgDir.resolve("orepicker.properties");
+    private static final String CONFIG_DIR = "config";
+    private static final String CONFIG_NAME = "orepicker.properties";
 
-        // ensure dir
-        try {
-            if (!Files.exists(cfgDir)) Files.createDirectories(cfgDir);
-        } catch (Throwable t) {
-            System.out.println("[OrePicker] Could not create config dir: " + t.getMessage());
-        }
+    private final Path configDirPath;
+    private final Path configFilePath;
 
-        Properties props = new Properties();
+    private WatchService watchService = null;
+    private Thread watcherThread = null;
+    private volatile boolean watching = false;
 
-        if (Files.exists(cfgFile)) {
-            try (InputStream in = Files.newInputStream(cfgFile)) {
-                props.load(in);
-            } catch (Throwable t) {
-                System.out.println("[OrePicker] Failed to load config file, using defaults: " + t.getMessage());
-            }
+    private final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
+
+    private ConfigManager() {
+        configDirPath = Paths.get(CONFIG_DIR);
+        configFilePath = configDirPath.resolve(CONFIG_NAME);
+    }
+
+    public static synchronized void load() {
+        if (INSTANCE == null) {
+            INSTANCE = new ConfigManager();
+            INSTANCE.ensureConfigExistsAndLoad();
+            INSTANCE.startWatcher();
         } else {
-            // write defaults
-            props.setProperty("maxVeinSize", String.valueOf(INSTANCE.maxVeinSize));
-            props.setProperty("maxVeinSizeCap", String.valueOf(INSTANCE.maxVeinSizeCap));
-            props.setProperty("mergeDifferentOreTypes", String.valueOf(INSTANCE.mergeDifferentOreTypes));
-            props.setProperty("autoCollectEnabled", String.valueOf(INSTANCE.autoCollectEnabled));
-            props.setProperty("pickupRadius", String.valueOf(INSTANCE.pickupRadius));
-            props.setProperty("extraOreBlocks", "");
-            props.setProperty("debug", String.valueOf(INSTANCE.debug));
-
-            try (OutputStream out = Files.newOutputStream(cfgFile)) {
-                String header = "OrePicker config - edit values as needed\n" +
-                        "# maxVeinSize: total blocks to break at once (including starting block)\n" +
-                        "# maxVeinSizeCap: absolute hard cap (safety)\n" +
-                        "# mergeDifferentOreTypes: true/false\n" +
-                        "# autoCollectEnabled: true/false\n" +
-                        "# pickupRadius: double (e.g. 1.5)\n" +
-                        "# extraOreBlocks: comma-separated list of block ids (modid:block_name)\n" +
-                        "# debug: true/false\n";
-                props.store(out, header);
-            } catch (Throwable t) {
-                System.out.println("[OrePicker] Failed to write default config: " + t.getMessage());
-            }
+            INSTANCE.reloadFromFile();
         }
+    }
 
-        // Apply properties with safe parsing
+    private void ensureConfigExistsAndLoad() {
         try {
-            String s;
-            s = props.getProperty("maxVeinSize");
-            if (s != null) {
-                try {
-                    int v = Integer.parseInt(s.trim());
-                    INSTANCE.maxVeinSize = Math.max(1, v);
-                } catch (NumberFormatException ignored) {}
+            if (Files.notExists(configDirPath)) {
+                Files.createDirectories(configDirPath);
             }
-
-            s = props.getProperty("maxVeinSizeCap");
-            if (s != null) {
-                try {
-                    int v = Integer.parseInt(s.trim());
-                    INSTANCE.maxVeinSizeCap = Math.max(1, v);
-                } catch (NumberFormatException ignored) {}
-            }
-
-            // ensure cap >= size
-            if (INSTANCE.maxVeinSize > INSTANCE.maxVeinSizeCap) {
-                INSTANCE.maxVeinSize = Math.min(INSTANCE.maxVeinSize, INSTANCE.maxVeinSizeCap);
-            }
-
-            s = props.getProperty("mergeDifferentOreTypes");
-            if (s != null) {
-                INSTANCE.mergeDifferentOreTypes = Boolean.parseBoolean(s.trim());
-            }
-
-            s = props.getProperty("autoCollectEnabled");
-            if (s != null) {
-                INSTANCE.autoCollectEnabled = Boolean.parseBoolean(s.trim());
-            }
-
-            s = props.getProperty("pickupRadius");
-            if (s != null) {
-                try {
-                    double d = Double.parseDouble(s.trim());
-                    INSTANCE.pickupRadius = Math.max(0.0, d);
-                } catch (NumberFormatException ignored) {}
-            }
-
-            s = props.getProperty("extraOreBlocks");
-            if (s != null) {
-                if (!s.trim().isEmpty()) {
-                    INSTANCE.extraOreBlocks = Arrays.stream(s.split(","))
-                            .map(String::trim)
-                            .filter(x -> !x.isEmpty())
-                            .collect(Collectors.toList());
-                } else {
-                    INSTANCE.extraOreBlocks = new java.util.ArrayList<>();
-                }
-            }
-
-            s = props.getProperty("debug");
-            if (s != null) {
-                INSTANCE.debug = Boolean.parseBoolean(s.trim());
-            }
-
-            System.out.println("[OrePicker] ConfigManager: loaded config (maxVeinSize=" + INSTANCE.maxVeinSize
-                    + ", maxVeinSizeCap=" + INSTANCE.maxVeinSizeCap
-                    + ", mergeDifferentOreTypes=" + INSTANCE.mergeDifferentOreTypes
-                    + ", autoCollectEnabled=" + INSTANCE.autoCollectEnabled
-                    + ", pickupRadius=" + INSTANCE.pickupRadius
-                    + ", extraOreBlocks=" + INSTANCE.extraOreBlocks.size()
-                    + ", debug=" + INSTANCE.debug + ")");
-        } catch (Throwable t) {
-            System.out.println("[OrePicker] Error applying config, using defaults: " + t.getMessage());
+        } catch (IOException e) {
+            System.err.println("[OrePicker] Failed to create config directory: " + e.getMessage());
         }
+
+        if (Files.notExists(configFilePath)) {
+            saveToFile();
+            System.out.println("[OrePicker] ConfigManager: created default config at " + configFilePath.toString());
+        }
+
+        reloadFromFile();
+    }
+
+    public synchronized void reloadFromFile() {
+        Properties p = new Properties();
+        try (BufferedReader reader = Files.newBufferedReader(configFilePath, StandardCharsets.UTF_8)) {
+            p.load(reader);
+        } catch (NoSuchFileException nsf) {
+            saveToFile();
+            System.out.println("[OrePicker] ConfigManager: config file not found, recreated default.");
+            return;
+        } catch (IOException ioe) {
+            System.err.println("[OrePicker] ConfigManager: failed to read config: " + ioe.getMessage());
+            return;
+        }
+
+        this.maxVeinSize = parseInt(p.getProperty("maxVeinSize"), this.maxVeinSize);
+        this.maxVeinSizeCap = parseInt(p.getProperty("maxVeinSizeCap"), this.maxVeinSizeCap);
+        this.mergeDifferentOreTypes = parseBoolean(p.getProperty("mergeDifferentOreTypes"), this.mergeDifferentOreTypes);
+        this.autoCollectEnabled = parseBoolean(p.getProperty("autoCollectEnabled"), this.autoCollectEnabled);
+        this.pickupRadius = parseDouble(p.getProperty("pickupRadius"), this.pickupRadius);
+        this.extraOreBlocks = p.getProperty("extraOreBlocks", this.extraOreBlocks);
+        this.debug = parseBoolean(p.getProperty("debug"), this.debug);
+
+        System.out.println("[OrePicker] ConfigManager: reloaded config (maxVeinSize=" + this.maxVeinSize
+                + ", maxVeinSizeCap=" + this.maxVeinSizeCap
+                + ", autoCollectEnabled=" + this.autoCollectEnabled
+                + ", pickupRadius=" + this.pickupRadius
+                + ", debug=" + this.debug + ")");
+
+        for (Runnable r : listeners) {
+            try {
+                r.run();
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    public synchronized void saveToFile() {
+        Properties p = new Properties();
+        p.setProperty("maxVeinSize", Integer.toString(this.maxVeinSize));
+        p.setProperty("maxVeinSizeCap", Integer.toString(this.maxVeinSizeCap));
+        p.setProperty("mergeDifferentOreTypes", Boolean.toString(this.mergeDifferentOreTypes));
+        p.setProperty("autoCollectEnabled", Boolean.toString(this.autoCollectEnabled));
+        p.setProperty("pickupRadius", Double.toString(this.pickupRadius));
+        p.setProperty("extraOreBlocks", this.extraOreBlocks == null ? "" : this.extraOreBlocks);
+        p.setProperty("debug", Boolean.toString(this.debug));
+
+        try (BufferedWriter writer = Files.newBufferedWriter(configFilePath, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+            p.store(writer, "OrePicker configuration");
+        } catch (IOException e) {
+            System.err.println("[OrePicker] ConfigManager: failed to write config file: " + e.getMessage());
+        }
+    }
+
+    private void startWatcher() {
+        if (watching) return;
+        try {
+            watchService = FileSystems.getDefault().newWatchService();
+            configDirPath.register(watchService, StandardWatchEventKinds.ENTRY_MODIFY, StandardWatchEventKinds.ENTRY_CREATE);
+        } catch (IOException e) {
+            System.err.println("[OrePicker] ConfigManager: cannot start watcher: " + e.getMessage());
+            return;
+        }
+
+        watching = true;
+        watcherThread = new Thread(() -> {
+            try {
+                while (watching) {
+                    WatchKey key = watchService.poll(750, TimeUnit.MILLISECONDS);
+                    if (key == null) continue;
+                    List<WatchEvent<?>> events = key.pollEvents();
+                    boolean reloadNeeded = false;
+                    for (WatchEvent<?> ev : events) {
+                        WatchEvent.Kind<?> kind = ev.kind();
+                        if (kind == StandardWatchEventKinds.OVERFLOW) continue;
+                        Object ctx = ev.context();
+                        if (!(ctx instanceof Path)) {
+                            String name = ctx.toString();
+                            if (CONFIG_NAME.equals(name)) reloadNeeded = true;
+                            continue;
+                        }
+                        Path changed = (Path) ctx;
+                        if (CONFIG_NAME.equals(changed.getFileName().toString())) {
+                            reloadNeeded = true;
+                        }
+                    }
+                    if (reloadNeeded) {
+                        try { Thread.sleep(150); } catch (InterruptedException ignored) {}
+                        try { reloadFromFile(); } catch (Throwable t) { System.err.println("[OrePicker] ConfigManager: error reloading config: " + t.getMessage()); }
+                    }
+                    boolean valid = key.reset();
+                    if (!valid) break;
+                }
+            } catch (InterruptedException ie) {
+            } finally {
+                try { if (watchService != null) watchService.close(); } catch (IOException ignored) {}
+            }
+        }, "orepicker-config-watcher");
+        watcherThread.setDaemon(true);
+        watcherThread.start();
+        System.out.println("[OrePicker] ConfigManager: started file watcher for " + configFilePath.toString());
+    }
+
+    public void stopWatcher() {
+        watching = false;
+        if (watcherThread != null) watcherThread.interrupt();
+        try { if (watchService != null) watchService.close(); } catch (IOException ignored) {}
+    }
+
+    private int parseInt(String s, int fallback) {
+        if (s == null) return fallback;
+        try { return Integer.parseInt(s.trim()); } catch (NumberFormatException e) { return fallback; }
+    }
+    private double parseDouble(String s, double fallback) {
+        if (s == null) return fallback;
+        try { return Double.parseDouble(s.trim()); } catch (NumberFormatException e) { return fallback; }
+    }
+    private boolean parseBoolean(String s, boolean fallback) {
+        if (s == null) return fallback;
+        String v = s.trim().toLowerCase();
+        if ("true".equals(v) || "1".equals(v) || "yes".equals(v) || "on".equals(v)) return true;
+        if ("false".equals(v) || "0".equals(v) || "no".equals(v) || "off".equals(v)) return false;
+        return fallback;
+    }
+
+    public void addChangeListener(Runnable r) {
+        if (r == null) return;
+        listeners.addIfAbsent(r);
+    }
+
+    public void removeChangeListener(Runnable r) {
+        if (r == null) return;
+        listeners.remove(r);
     }
 }
