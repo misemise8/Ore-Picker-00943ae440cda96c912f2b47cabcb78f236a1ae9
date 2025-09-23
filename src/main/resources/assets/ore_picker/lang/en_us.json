@@ -1,0 +1,10 @@
+{
+  "text.ore_picker.config.title": "Ore Picker Settings",
+  "text.ore_picker.config.general": "General",
+  "text.ore_picker.config.maxVeinSize": "Max vein size",
+  "text.ore_picker.config.maxVeinSizeCap": "Max vein cap",
+  "text.ore_picker.config.autoCollectEnabled": "Enable auto-collect",
+  "text.ore_picker.config.pickupRadius": "Pickup radius",
+  "text.ore_picker.config.debug": "Enable debug logs",
+  "text.ore_picker.config.extraOreBlocks": "Extra ore blocks"
+}

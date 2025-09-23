@@ -12,15 +12,22 @@ import net.misemise.ore_picker.config.ConfigManager;
 import java.util.*;
 
 /**
- * Cloth Config を用いた設定画面。
+ * Cloth Config を用いた設定画面（enum を使うように修正済み）。
  *
  * - 言語オーバーライド（ConfigManager.languageOverride）をサポート（""=自動）
  * - extraOreBlocks をストリングリストで編集可能にする
  *
  * 注意:
- * - ConfigManager に public String languageOverride = ""; を追加してください（下記参照）。
+ * - ConfigManager に public String languageOverride = ""; を追加してください（"" = 自動）。
  */
 public class ClothConfigScreen {
+    // 内部 enum（Cloth の startEnumSelector に渡すため）
+    private enum LanguageOption {
+        AUTO, // corresponds to ""
+        EN_US, // "en_us"
+        JA_JP  // "ja_jp"
+    }
+
     // 簡易辞書: override が入っている場合に UI テキストをこちらの辞書で返す
     private static final Map<String, Map<String, String>> BUILTIN_LOCALES = new HashMap<>();
 
@@ -37,7 +44,7 @@ public class ClothConfigScreen {
         en.put("text.ore_picker.config.languageOverride", "Language override (empty = follow game)");
         en.put("text.ore_picker.config.lang_empty", "Follow game language");
         en.put("text.ore_picker.config.lang_en", "English (en_us)");
-        en.put("text.ore_picker.config.lang_ja", "日本語 (ja_jp)");
+        en.put("text.ore_picker.config.lang_ja", "Japanese (ja_jp)");
 
         Map<String, String> ja = new HashMap<>();
         ja.put("text.ore_picker.config.title", "Ore Picker 設定");
@@ -71,6 +78,33 @@ public class ClothConfigScreen {
         }
         // デフォルトはゲームの言語に従う
         return Text.translatable(key);
+    }
+
+    // helper: convert string in config to enum
+    private static LanguageOption languageOptionFromString(String s) {
+        if (s == null || s.trim().isEmpty()) return LanguageOption.AUTO;
+        s = s.toLowerCase(Locale.ROOT);
+        switch (s) {
+            case "en_us":
+            case "en":
+                return LanguageOption.EN_US;
+            case "ja_jp":
+            case "ja":
+                return LanguageOption.JA_JP;
+            default:
+                return LanguageOption.AUTO;
+        }
+    }
+
+    // helper: convert enum to string saved in config
+    private static String languageOptionToString(LanguageOption o) {
+        if (o == null) return "";
+        switch (o) {
+            case EN_US: return "en_us";
+            case JA_JP: return "ja_jp";
+            case AUTO:
+            default:    return "";
+        }
     }
 
     public static void open(Screen parent) {
@@ -137,18 +171,20 @@ public class ClothConfigScreen {
                     .setDefaultValue(false)
                     .build());
 
-            // --- language override (選択肢) ---
-            List<String> langChoices = Arrays.asList("", "en_us", "ja_jp");
-            Map<String, String> displayMap = new LinkedHashMap<>();
-            displayMap.put("", tr(cfgMgr, "text.ore_picker.config.lang_empty").getString());
-            displayMap.put("en_us", tr(cfgMgr, "text.ore_picker.config.lang_en").getString());
-            displayMap.put("ja_jp", tr(cfgMgr, "text.ore_picker.config.lang_ja").getString());
-
+            // --- language override (enum-based selector) ---
+            LanguageOption currentLangOpt = languageOptionFromString(cfgMgr.languageOverride);
             general.addEntry(entryBuilder
-                    .startEnumSelector(tr(cfgMgr, "text.ore_picker.config.languageOverride"), String.class, cfgMgr.languageOverride == null ? "" : cfgMgr.languageOverride)
-                    .setDefaultValue("")
-                    .setEnumNameProvider(s -> displayMap.getOrDefault(s, s))
-                    .setSaveConsumer((String v) -> cfgMgr.languageOverride = (v == null ? "" : v))
+                    .startEnumSelector(tr(cfgMgr, "text.ore_picker.config.languageOverride"), LanguageOption.class, currentLangOpt)
+                    .setDefaultValue(LanguageOption.AUTO)
+                    .setEnumNameProvider(opt -> {
+                        switch (opt) {
+                            case EN_US: return tr(cfgMgr, "text.ore_picker.config.lang_en").getString();
+                            case JA_JP: return tr(cfgMgr, "text.ore_picker.config.lang_ja").getString();
+                            case AUTO:
+                            default:    return tr(cfgMgr, "text.ore_picker.config.lang_empty").getString();
+                        }
+                    })
+                    .setSaveConsumer((LanguageOption v) -> cfgMgr.languageOverride = languageOptionToString(v))
                     .build());
 
             // --- extraOreBlocks: List editor（Cloth のストリングリストエントリを使用） ---
