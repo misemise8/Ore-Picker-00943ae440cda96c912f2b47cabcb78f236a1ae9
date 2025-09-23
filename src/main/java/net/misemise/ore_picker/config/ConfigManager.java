@@ -41,6 +41,9 @@ public final class ConfigManager {
 
     private final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
 
+    // 例: public String extraOreBlocks = "";
+    public String languageOverride = ""; // "" = follow game, or "en_us", "ja_jp" to force
+
     private ConfigManager() {
         configDirPath = Paths.get(CONFIG_DIR);
         configFilePath = configDirPath.resolve(CONFIG_NAME);

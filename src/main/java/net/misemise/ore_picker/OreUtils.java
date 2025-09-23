@@ -2,6 +2,9 @@ package net.misemise.ore_picker;
 
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Block;
+import net.minecraft.block.ExperienceDroppingBlock;
+import net.minecraft.util.Identifier;
+import net.minecraft.util.registry.Registry;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -9,58 +12,57 @@ import java.util.List;
 /**
  * OreUtils - 鉱石判定ユーティリティ
  *
- * - ConfigManager.INSTANCE.extraOreBlocks がカンマ区切りの文字列でも扱えるようにする
- * - デフォルトでは block.toString() に "ore" を含むものを鉱石とみなす
- * - optional: ExperienceDroppingBlock を継承している場合も鉱石扱い（XP を落とすブロック）
+ * 判定ルール（優先度順）:
+ * 1) ConfigManager.INSTANCE.extraOreBlocks に明示されたブロックID（カンマ区切り）に一致する場合は鉱石とみなす
+ * 2) ブロックが ExperienceDroppingBlock のサブクラスであれば鉱石とみなす（原石系は XP を落とすことが多い）
+ * 3) ブロックの Registry ID の path に "ore" を含む場合は鉱石とみなす（フォールバック）
  */
 public final class OreUtils {
     private OreUtils() {}
 
-    /**
-     * 鉱石かどうかを判定する。
-     * 他 mod の鉱石を含めたい場合は config/orepicker.properties の
-     * extraOreBlocks にカンマ区切りでキーワードまたは block id を追加できます。
-     *
-     * 例:
-     *   extraOreBlocks=modid:mythril_ore,modid:tin_ore
-     */
     public static boolean isOre(BlockState state) {
         if (state == null) return false;
-        Block blk = state.getBlock();
-        if (blk == null) return false;
+        Block block = state.getBlock();
 
-        String blockStr = "";
-        try {
-            blockStr = blk.toString().toLowerCase();
-        } catch (Throwable ignored) {}
-
-        // 1) config による追加マッチ（extraOreBlocks はカンマ区切りの String として扱う）
+        // 1) 明示リストチェック（ConfigManager の extraOreBlocks はカンマ区切りの文字列）
         try {
             if (net.misemise.ore_picker.config.ConfigManager.INSTANCE != null) {
                 String extra = net.misemise.ore_picker.config.ConfigManager.INSTANCE.extraOreBlocks;
-                if (extra != null && !extra.trim().isEmpty()) {
-                    List<String> keys = parseCommaSeparated(extra);
-                    for (String k : keys) {
-                        String kk = k.toLowerCase().trim();
-                        if (kk.isEmpty()) continue;
-                        // 部分一致で許容（より寛容にすることで mod の id や名前に対応しやすくする）
-                        if (blockStr.contains(kk) || kk.contains(blockStr) || blockStr.equals(kk)) {
-                            return true;
-                        }
+                List<String> extras = parseCommaSeparated(extra);
+                Identifier id = null;
+                try {
+                    id = Registry.BLOCK.getId(block);
+                } catch (Throwable ignored) { }
+                String idStr = id != null ? id.toString() : block.toString();
+                for (String e : extras) {
+                    if (e == null || e.isEmpty()) continue;
+                    if (e.equalsIgnoreCase(idStr)) return true;
+                    // allow matching just path (minecraft:iron_ore => iron_ore)
+                    if (idStr.contains(":")) {
+                        String path = idStr.substring(idStr.indexOf(':') + 1);
+                        if (e.equalsIgnoreCase(path)) return true;
                     }
                 }
             }
         } catch (Throwable ignored) {}
 
-        // 2) 名前に "ore" が含まれているものは鉱石扱い（vanilla と多くの mod をカバー）
+        // 2) XPドロップ判定（多くの鉱石は XP を落とす）
         try {
-            if (blockStr.contains("ore")) return true;
+            if (block instanceof ExperienceDroppingBlock) return true;
         } catch (Throwable ignored) {}
 
-        // 3) ExperienceDroppingBlock を継承していれば鉱石（XP を落とすブロック）
+        // 3) id 文字列に "ore" を含むかどうか（フォールバック）
         try {
-            Class<?> edClass = Class.forName("net.minecraft.block.ExperienceDroppingBlock");
-            if (edClass.isAssignableFrom(blk.getClass())) return true;
+            Identifier id = null;
+            try {
+                id = Registry.BLOCK.getId(block);
+            } catch (Throwable ignored) {}
+            if (id != null) {
+                if (id.getPath().toLowerCase().contains("ore")) return true;
+            } else {
+                String s = block.toString().toLowerCase();
+                if (s.contains("ore")) return true;
+            }
         } catch (Throwable ignored) {}
 
         return false;

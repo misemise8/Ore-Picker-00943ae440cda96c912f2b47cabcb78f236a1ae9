@@ -4,192 +4,95 @@ import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Block;
 import net.minecraft.item.ItemStack;
-import net.minecraft.block.Blocks;
 
-import java.lang.reflect.Method;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
 /**
- * VeinMiner:
- * - BFS で同種ブロックを探索し、limit を超えたら探索を停止する。
- * - 各ブロック破壊時に toolStack を利用して drop を生成する（可能な場合は Block.dropStacks を呼ぶ）。
+ * VeinMiner - 同一鉱石群をまとめて破壊するユーティリティ。
+ *
+ * - 26近傍（斜め含む）を採用して、斜め接続も含める。
+ * - CollectScheduler が呼ぶ mineAndSchedule(...) を提供（ラッパ）。
  */
 public final class VeinMiner {
     private VeinMiner() {}
 
     /**
-     * mineAndSchedule:
-     *  - limit: 開始ブロックを含む合計上限
-     *  - toolStack: スケジュール時にキャプチャしたツール（null 可）
+     * CollectScheduler から呼ばれる想定のラッパ。
+     *
+     * @param world ServerWorld（破壊を行うワールド）
+     * @param player 操作プレイヤー（ドロップハンドリング等に渡す）
+     * @param startPos 開始座標
+     * @param originalState 開始ブロックの BlockState（未使用だが呼び出し元が渡す）
+     * @param playerUuid プレイヤー UUID（未使用だが呼び出し元に合わせる）
+     * @param cap 最大破壊数
+     * @param toolStack 使用中のツール（必要なら将来使う）
+     * @return 破壊したブロック数
      */
-    public static int mineAndSchedule(ServerWorld world, ServerPlayerEntity player, BlockPos startPos, BlockState originalState, UUID playerUuid, int limit, ItemStack toolStack) {
-        if (world == null || player == null || originalState == null) return 0;
-        Block target = originalState.getBlock();
-        if (target == null) return 0;
+    public static int mineAndSchedule(ServerWorld world,
+                                      ServerPlayerEntity player,
+                                      BlockPos startPos,
+                                      BlockState originalState,
+                                      UUID playerUuid,
+                                      int cap,
+                                      ItemStack toolStack) {
+        // 現状は単純に breakVein を呼ぶラッパ実装（将来的にスケジューリング等を追加可能）
+        return breakVein(world, startPos, player, cap);
+    }
 
-        int neighborLimit = Math.max(0, limit - 1);
-
-        Deque<BlockPos> q = new ArrayDeque<>();
-        Set<BlockPos> visited = new HashSet<>();
-        List<BlockPos> toBreak = new ArrayList<>();
-
-        final int[][] DIRS = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-        for (int[] d : DIRS) {
-            BlockPos n = startPos.add(d[0], d[1], d[2]);
-            q.add(n);
-            visited.add(n);
-        }
-
-        while (!q.isEmpty() && toBreak.size() < neighborLimit) {
-            BlockPos p = q.poll();
-            if (p == null) continue;
-
-            BlockState bs = world.getBlockState(p);
-            if (bs == null) continue;
-            if (bs.getBlock() != target) continue;
-
-            toBreak.add(p);
-            if (toBreak.size() >= neighborLimit) break;
-
-            for (int[] d : DIRS) {
-                BlockPos nn = p.add(d[0], d[1], d[2]);
-                if (visited.contains(nn)) continue;
-                visited.add(nn);
-                BlockState ns = world.getBlockState(nn);
-                if (ns != null && ns.getBlock() == target) {
-                    q.add(nn);
-                }
-            }
-        }
-
+    /**
+     * 開始座標から BFS で同一鉱石を cap まで破壊する（斜め含む）。
+     *
+     * @param world ServerWorld
+     * @param startPos 開始座標
+     * @param player 操作プレイヤー
+     * @param cap 最大破壊数
+     * @return 破壊したブロック数
+     */
+    public static int breakVein(ServerWorld world, BlockPos startPos, ServerPlayerEntity player, int cap) {
         int broken = 0;
-        for (BlockPos p : toBreak) {
+
+        BlockState originalState = world.getBlockState(startPos);
+
+        // 鉱石でないなら何もしない
+        if (!OreUtils.isOre(originalState)) return 0;
+
+        Deque<BlockPos> queue = new ArrayDeque<>();
+        Set<BlockPos> visited = new HashSet<>();
+
+        queue.add(startPos);
+        visited.add(startPos);
+
+        while (!queue.isEmpty() && broken < cap) {
+            BlockPos pos = queue.pollFirst();
+            BlockState state = world.getBlockState(pos);
+
+            if (state.isAir()) continue;
+            if (!OreUtils.isOre(state)) continue;
+
             try {
-                BlockState currentState = world.getBlockState(p);
-                if (currentState == null) continue;
-
-                boolean dropped = false;
-
-                // 1) try to call Block.dropStacks(...) via reflection passing toolStack where possible
-                try {
-                    Class<?> blockClass = Class.forName("net.minecraft.block.Block");
-                    Class<?> blockStateClass = Class.forName("net.minecraft.block.BlockState");
-                    Class<?> worldClass = Class.forName("net.minecraft.world.World");
-                    Class<?> blockPosClass = Class.forName("net.minecraft.util.math.BlockPos");
-                    Class<?> blockEntityClass = null;
-                    try { blockEntityClass = Class.forName("net.minecraft.block.entity.BlockEntity"); } catch (Throwable ignored) {}
-                    Class<?> entityClass = Class.forName("net.minecraft.entity.Entity");
-                    Class<?> itemStackClass = Class.forName("net.minecraft.item.ItemStack");
-
-                    Method dropStacksMethod = null;
-                    try {
-                        dropStacksMethod = blockClass.getMethod("dropStacks", blockStateClass, worldClass, blockPosClass, blockEntityClass, entityClass, itemStackClass);
-                    } catch (Throwable ex) {
-                        for (Method m : blockClass.getMethods()) {
-                            if (!m.getName().equals("dropStacks")) continue;
-                            Class<?>[] params = m.getParameterTypes();
-                            if (params.length >= 3) {
-                                if (params[0].getName().toLowerCase().contains("blockstate")) {
-                                    dropStacksMethod = m;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if (dropStacksMethod != null) {
-                        try {
-                            Object be = null;
-                            Class<?>[] params = dropStacksMethod.getParameterTypes();
-                            Object[] args = new Object[params.length];
-                            for (int i = 0; i < params.length; i++) {
-                                String pn = params[i].getName().toLowerCase();
-                                if (pn.contains("blockstate")) args[i] = currentState;
-                                else if (pn.contains("world")) args[i] = (Object) world;
-                                else if (pn.contains("blockpos")) args[i] = p;
-                                else if (pn.contains("blockentity")) args[i] = null;
-                                else if (pn.contains("entity")) args[i] = player;
-                                else if (pn.contains("itemstack")) args[i] = toolStack;
-                                else args[i] = null;
-                            }
-
-                            if ((dropStacksMethod.getModifiers() & java.lang.reflect.Modifier.STATIC) != 0) {
-                                dropStacksMethod.invoke(null, args);
-                            } else {
-                                Object blockObj = currentState.getBlock();
-                                dropStacksMethod.invoke(blockObj, args);
-                            }
-                            dropped = true;
-                        } catch (Throwable exInvoke) {
-                            dropped = false;
-                        }
-                    }
-                } catch (Throwable reflectionEx) {
-                    dropped = false;
-                }
-
-                // 2) fallback: temporarily swap player's main hand and call world.breakBlock
-                if (!dropped) {
-                    ItemStack originalMain = null;
-                    Integer selectedSlot = null;
-                    boolean swapped = false;
-                    try {
-                        if (toolStack != null) {
-                            try {
-                                selectedSlot = player.getInventory().selectedSlot;
-                            } catch (Throwable t) {
-                                try {
-                                    java.lang.reflect.Field f = player.getInventory().getClass().getField("selectedSlot");
-                                    selectedSlot = (Integer) f.get(player.getInventory());
-                                } catch (Throwable ignored) {
-                                    selectedSlot = null;
-                                }
-                            }
-
-                            if (selectedSlot != null) {
-                                try {
-                                    originalMain = player.getInventory().getStack(selectedSlot);
-                                    player.getInventory().setStack(selectedSlot, toolStack.copy());
-                                    swapped = true;
-                                } catch (Throwable ignored) {
-                                    swapped = false;
-                                }
-                            }
-                        }
-                    } catch (Throwable ignored) {
-                        swapped = false;
-                    }
-
-                    try {
-                        world.breakBlock(p, true, player);
-                    } catch (Throwable ex2) {
-                        try { world.setBlockState(p, Blocks.AIR.getDefaultState(), 3); } catch (Throwable ignored) {}
-                    }
-
-                    if (swapped && selectedSlot != null) {
-                        try { player.getInventory().setStack(selectedSlot, originalMain); } catch (Throwable ignored) {}
-                    }
-                } else {
-                    // remove the block to avoid duplicates
-                    try { world.setBlockState(p, Blocks.AIR.getDefaultState(), 3); } catch (Throwable ignored) {}
-                }
-
-                // schedule collect for the broken block to pick up its drops (pass toolStack)
-                try {
-                    CollectScheduler.schedule(world, p, playerUuid, originalState, false, toolStack);
-                } catch (Throwable ignored) {}
-
-                broken++;
+                boolean success = world.breakBlock(pos, true, player);
+                if (success) broken++;
             } catch (Throwable t) {
                 t.printStackTrace();
+            }
+
+            // 26近傍（斜め含む）
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+                        BlockPos nb = pos.add(dx, dy, dz);
+                        if (!visited.contains(nb)) {
+                            visited.add(nb);
+                            queue.add(nb);
+                        }
+                    }
+                }
             }
         }
 

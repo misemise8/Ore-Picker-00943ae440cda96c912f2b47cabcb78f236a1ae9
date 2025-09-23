@@ -56,6 +56,8 @@ public class Ore_pickerClient implements ClientModInitializer {
 
         // HUD
         HoldHudOverlay.register();
+
+        net.misemise.ore_picker.client.ConfigScreenOpener.init();
     }
 
     private static void sendHoldPayload(boolean pressed) {
