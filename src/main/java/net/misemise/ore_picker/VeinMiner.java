@@ -1,13 +1,14 @@
 package net.misemise.ore_picker;
 
+import net.misemise.ore_picker.config.ConfigManager;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.Identifier;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Block;
 import net.minecraft.item.ItemStack;
 import net.minecraft.block.Blocks;
-import net.minecraft.entity.ItemEntity;
+import net.minecraft.text.Text;
 
 import java.lang.reflect.Method;
 import java.util.ArrayDeque;
@@ -17,14 +18,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-
+import net.minecraft.util.math.BlockPos;
 /**
  * VeinMiner:
- * - BFS で同種ブロックを探索（26近傍：斜め含む）
- * - 各ブロック破壊時に toolStack を利用して drop を生成する（可能な場合は Block.dropStacks を呼ぶ via reflection）
- * - dropStacks で生成された ItemEntity を見つけ、pickupDelay を 0 にして回収しやすくする
- * - dropStacks が呼べない場合はプレイヤーのメインハンドを一時差し替えて world.breakBlock を呼ぶ（フォールバック）
- * - 各破壊ブロックは CollectScheduler に再スケジュールして AutoCollect で拾わせる（toolStack を渡す）
+ * - BFS で同種ブロックを探索し、limit を超えたら探索を停止する。
+ * - 各ブロック破壊時に toolStack を利用して drop を生成する（可能な場合は Block.dropStacks を呼ぶ）。
  */
 public final class VeinMiner {
     private VeinMiner() {}
@@ -39,53 +37,39 @@ public final class VeinMiner {
         Block target = originalState.getBlock();
         if (target == null) return 0;
 
-        if (limit <= 0) return 0;
-
         int neighborLimit = Math.max(0, limit - 1);
 
         Deque<BlockPos> q = new ArrayDeque<>();
         Set<BlockPos> visited = new HashSet<>();
         List<BlockPos> toBreak = new ArrayList<>();
 
-        // initialize queue with all 26 neighbors (dx,dy,dz = -1..1 excluding 0,0,0)
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dz = -1; dz <= 1; dz++) {
-                    if (dx == 0 && dy == 0 && dz == 0) continue;
-                    BlockPos n = startPos.add(dx, dy, dz);
-                    q.add(n);
-                    visited.add(n);
-                }
-            }
+        // 6-direction neighbors (you can expand to 26 if desired)
+        final int[][] DIRS = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+        for (int[] d : DIRS) {
+            BlockPos n = startPos.add(d[0], d[1], d[2]);
+            q.add(n);
+            visited.add(n);
         }
 
-        // BFS: collect up to neighborLimit matching blocks
         while (!q.isEmpty() && toBreak.size() < neighborLimit) {
             BlockPos p = q.poll();
             if (p == null) continue;
 
-            try {
-                BlockState bs = world.getBlockState(p);
-                if (bs == null) continue;
-                if (bs.getBlock() != target) continue;
+            BlockState bs = world.getBlockState(p);
+            if (bs == null) continue;
+            if (bs.getBlock() != target) continue;
 
-                toBreak.add(p);
-                if (toBreak.size() >= neighborLimit) break;
+            toBreak.add(p);
+            if (toBreak.size() >= neighborLimit) break;
 
-                // enqueue 26 neighbors of p
-                for (int dx = -1; dx <= 1; dx++) {
-                    for (int dy = -1; dy <= 1; dy++) {
-                        for (int dz = -1; dz <= 1; dz++) {
-                            if (dx == 0 && dy == 0 && dz == 0) continue;
-                            BlockPos nn = p.add(dx, dy, dz);
-                            if (visited.contains(nn)) continue;
-                            visited.add(nn);
-                            q.add(nn);
-                        }
-                    }
+            for (int[] d : DIRS) {
+                BlockPos nn = p.add(d[0], d[1], d[2]);
+                if (visited.contains(nn)) continue;
+                visited.add(nn);
+                BlockState ns = world.getBlockState(nn);
+                if (ns != null && ns.getBlock() == target) {
+                    q.add(nn);
                 }
-            } catch (Throwable ex) {
-                ex.printStackTrace();
             }
         }
 
@@ -155,37 +139,32 @@ public final class VeinMiner {
                     dropped = false;
                 }
 
-                // If dropped via dropStacks, try to find spawned ItemEntity's and make them immediately collectible
-                if (dropped) {
-                    try {
-                        makeNearbyDropsPickupable(world, p);
-                    } catch (Throwable ignored) {}
-                }
-
                 // 2) fallback: temporarily swap player's main hand and call world.breakBlock
                 if (!dropped) {
                     ItemStack originalMain = null;
                     Integer selectedSlot = null;
                     boolean swapped = false;
                     try {
-                        try {
-                            selectedSlot = player.getInventory().selectedSlot;
-                        } catch (Throwable t) {
+                        if (toolStack != null) {
                             try {
-                                java.lang.reflect.Field f = player.getInventory().getClass().getField("selectedSlot");
-                                selectedSlot = (Integer) f.get(player.getInventory());
-                            } catch (Throwable ignored) {
-                                selectedSlot = null;
+                                selectedSlot = player.getInventory().selectedSlot;
+                            } catch (Throwable t) {
+                                try {
+                                    java.lang.reflect.Field f = player.getInventory().getClass().getField("selectedSlot");
+                                    selectedSlot = (Integer) f.get(player.getInventory());
+                                } catch (Throwable ignored) {
+                                    selectedSlot = null;
+                                }
                             }
-                        }
 
-                        if (selectedSlot != null && toolStack != null) {
-                            try {
-                                originalMain = player.getInventory().getStack(selectedSlot);
-                                player.getInventory().setStack(selectedSlot, toolStack.copy());
-                                swapped = true;
-                            } catch (Throwable ignored) {
-                                swapped = false;
+                            if (selectedSlot != null) {
+                                try {
+                                    originalMain = player.getInventory().getStack(selectedSlot);
+                                    player.getInventory().setStack(selectedSlot, toolStack.copy());
+                                    swapped = true;
+                                } catch (Throwable ignored) {
+                                    swapped = false;
+                                }
                             }
                         }
                     } catch (Throwable ignored) {
@@ -202,7 +181,7 @@ public final class VeinMiner {
                         try { player.getInventory().setStack(selectedSlot, originalMain); } catch (Throwable ignored) {}
                     }
                 } else {
-                    // remove the block to avoid duplicates if needed
+                    // remove the block to avoid duplicates
                     try { world.setBlockState(p, Blocks.AIR.getDefaultState(), 3); } catch (Throwable ignored) {}
                 }
 
@@ -220,49 +199,21 @@ public final class VeinMiner {
         if (broken > 0) {
             try {
                 String blockId = originalState.getBlock().toString();
-                player.sendMessage(net.minecraft.text.Text.of("Vein broken: " + broken + " " + blockId), false);
+                // チャットに出すかどうかは設定次第
+                try {
+                    if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.logToChat) {
+                        // 翻訳キーを使って表示（lang ファイルで整える）
+                        player.sendMessage(Text.translatable("chat.ore_picker.vein_broken", broken, Text.literal(blockId)), false);
+                    }
+                } catch (Throwable ignored) {}
+
+                // サーバー側ログ（コンソール）には常に出す
+                try {
+                    System.out.println("[VeinMiner] Vein broken: " + broken + " " + blockId);
+                } catch (Throwable ignored) {}
             } catch (Throwable ignored) {}
         }
 
         return broken;
-    }
-
-    /**
-     * dropStacks 等で spawn された ItemEntity を見つけて pickupDelay=0、velocity=0 にする（即回収可能にする）
-     */
-    private static void makeNearbyDropsPickupable(ServerWorld world, BlockPos pos) {
-        try {
-            double r = 1.0d;
-            List<ItemEntity> items = world.getEntitiesByClass(ItemEntity.class,
-                    new net.minecraft.util.math.Box(pos.getX() - r, pos.getY() - r, pos.getZ() - r,
-                            pos.getX() + r, pos.getY() + r, pos.getZ() + r),
-                    e -> true);
-            for (ItemEntity ie : items) {
-                try {
-                    // set pickup delay to 0 if method available
-                    try {
-                        Method m = ie.getClass().getMethod("setPickupDelay", int.class);
-                        m.invoke(ie, 0);
-                    } catch (Throwable ex) {
-                        try {
-                            java.lang.reflect.Field f = ie.getClass().getField("pickupDelay");
-                            f.setInt(ie, 0);
-                        } catch (Throwable ignored) {}
-                    }
-                    // zero velocity
-                    try {
-                        Method setVelocity = ie.getClass().getMethod("setVelocity", double.class, double.class, double.class);
-                        setVelocity.invoke(ie, 0.0d, 0.0d, 0.0d);
-                    } catch (Throwable ex) {
-                        try {
-                            Method setVelocityVec = ie.getClass().getMethod("setVelocity", net.minecraft.util.math.Vec3d.class);
-                            setVelocityVec.invoke(ie, new net.minecraft.util.math.Vec3d(0.0d, 0.0d, 0.0d));
-                        } catch (Throwable ignored) {}
-                    }
-                } catch (Throwable ex) {
-                    // ignore per-item failures
-                }
-            }
-        } catch (Throwable ignored) {}
     }
 }

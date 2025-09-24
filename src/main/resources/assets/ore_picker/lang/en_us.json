@@ -6,5 +6,7 @@
   "text.ore_picker.config.autoCollectEnabled": "Enable auto-collect",
   "text.ore_picker.config.pickupRadius": "Pickup radius",
   "text.ore_picker.config.debug": "Enable debug logs",
-  "text.ore_picker.config.extraOreBlocks": "Extra ore blocks"
+  "text.ore_picker.config.extraOreBlocks": "Extra ore blocks",
+  "hud.ore_picker.active": "OrePicker: Active",
+  "chat.ore_picker.vein_broken": "Vein broken: %d %s"
 }

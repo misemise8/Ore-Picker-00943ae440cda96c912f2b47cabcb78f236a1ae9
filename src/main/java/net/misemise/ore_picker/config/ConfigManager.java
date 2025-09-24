@@ -3,7 +3,6 @@ package net.misemise.ore_picker.config;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
-import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.List;
@@ -13,8 +12,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * ConfigManager
- *
- * - シンプルな properties ベースの設定管理
+ * - properties ベースの設定管理
  * - 起動時に config/orepicker.properties を作成/読み込み
  * - ファイル変更を WatchService で監視し、変更時に自動リロード
  */
@@ -41,18 +39,22 @@ public final class ConfigManager {
 
     private final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
 
-    // 例: public String extraOreBlocks = "";
-    public String languageOverride = ""; // "" = follow game, or "en_us", "ja_jp" to force
+    // 既存: 空文字列 = ゲームに従う
+    public String languageOverride = "";
 
     // UI の一時保持フィールド（Cloth 画面で使う）
     public String tempAddById = "";
     public String tempAddByMod = "";
 
     // 動作制御
-    // true = 鉱石の一括破壊はツールが Pickaxe のときのみ有効（デフォルト true）
     public boolean requirePickaxeForVein = true;
-    // true = クリエイティブでも一括破壊を適用（デフォルト false）
     public boolean applyInCreative = false;
+
+    // HUD とチャットログの制御（追加項目）
+    // HUD を表示するか（押下ホールド中に表示するか） - default true
+    public boolean enableHudOverlay = true;
+    // 一括破壊時にチャットへログを出すか（default false）
+    public boolean logToChat = false;
 
     private ConfigManager() {
         configDirPath = Paths.get(CONFIG_DIR);
@@ -107,10 +109,13 @@ public final class ConfigManager {
         this.extraOreBlocks = p.getProperty("extraOreBlocks", this.extraOreBlocks);
         this.debug = parseBoolean(p.getProperty("debug"), this.debug);
 
-        // 新しく永続化した項目
+        // 新しい設定項目を読み込む
         this.languageOverride = p.getProperty("languageOverride", this.languageOverride);
         this.requirePickaxeForVein = parseBoolean(p.getProperty("requirePickaxeForVein"), this.requirePickaxeForVein);
         this.applyInCreative = parseBoolean(p.getProperty("applyInCreative"), this.applyInCreative);
+
+        this.enableHudOverlay = parseBoolean(p.getProperty("enableHudOverlay"), this.enableHudOverlay);
+        this.logToChat = parseBoolean(p.getProperty("logToChat"), this.logToChat);
 
         System.out.println("[OrePicker] ConfigManager: reloaded config (maxVeinSize=" + this.maxVeinSize
                 + ", maxVeinSizeCap=" + this.maxVeinSizeCap
@@ -120,6 +125,8 @@ public final class ConfigManager {
                 + ", languageOverride=" + this.languageOverride
                 + ", requirePickaxeForVein=" + this.requirePickaxeForVein
                 + ", applyInCreative=" + this.applyInCreative
+                + ", enableHudOverlay=" + this.enableHudOverlay
+                + ", logToChat=" + this.logToChat
                 + ")");
 
         for (Runnable r : listeners) {
@@ -143,6 +150,8 @@ public final class ConfigManager {
         p.setProperty("languageOverride", this.languageOverride == null ? "" : this.languageOverride);
         p.setProperty("requirePickaxeForVein", Boolean.toString(this.requirePickaxeForVein));
         p.setProperty("applyInCreative", Boolean.toString(this.applyInCreative));
+        p.setProperty("enableHudOverlay", Boolean.toString(this.enableHudOverlay));
+        p.setProperty("logToChat", Boolean.toString(this.logToChat));
 
         try (BufferedWriter writer = Files.newBufferedWriter(configFilePath, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
             p.store(writer, "OrePicker configuration");

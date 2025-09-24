@@ -6,5 +6,7 @@
   "text.ore_picker.config.autoCollectEnabled": "自動回収を有効にする",
   "text.ore_picker.config.pickupRadius": "回収半径",
   "text.ore_picker.config.debug": "デバッグログを有効にする",
-  "text.ore_picker.config.extraOreBlocks": "追加鉱石ブロック"
+  "text.ore_picker.config.extraOreBlocks": "追加鉱石ブロック",
+  "hud.ore_picker.active": "OrePicker：ホールド中",
+  "chat.ore_picker.vein_broken": "一括破壊：%d 個の %s"
 }
