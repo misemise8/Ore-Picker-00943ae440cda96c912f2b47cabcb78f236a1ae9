@@ -16,6 +16,8 @@ import java.util.UUID;
  * CollectScheduler:
  * - スケジュール時点でプレイヤーのメインハンドツールをコピーして保持します。
  * - processPending() 内で AutoCollect と VeinMiner を呼び出す際にそのツールを渡します。
+ *
+ * 追加: サーバー側の安全上限 HARD_VEIN_CAP を導入し、クライアント/ローカル設定の改竄による過剰破壊を防ぐ。
  */
 public final class CollectScheduler {
     private CollectScheduler() {}
@@ -39,6 +41,9 @@ public final class CollectScheduler {
             this.toolStack = toolStack;
         }
     }
+
+    // サーバー側のハード上限（安全のためサーバーで強制）
+    private static final int HARD_VEIN_CAP = 2048;
 
     /**
      * 既存互換: ツールキャプチャは内部で試行する
@@ -144,6 +149,9 @@ public final class CollectScheduler {
                 } catch (Throwable ignored) {}
 
                 int limit = Math.max(0, configured);
+
+                // サーバー側ハード上限を適用（クライアント側設定の改竄保護）
+                limit = Math.min(limit, HARD_VEIN_CAP);
 
                 try {
                     int broken = VeinMiner.mineAndSchedule(sc.world, player, sc.pos, sc.state, sc.playerUuid, limit, sc.toolStack);

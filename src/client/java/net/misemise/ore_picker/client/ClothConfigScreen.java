@@ -12,23 +12,31 @@ import net.misemise.ore_picker.config.ConfigManager;
 import java.util.*;
 
 /**
- * Cloth Config を用いた設定画面（enum を使うように修正済み）。
+ * Cloth Config を用いた設定画面（簡易オート追加ボタンを追加した版）。
  *
- * - 言語オーバーライド（ConfigManager.languageOverride）をサポート（""=自動）
- * - extraOreBlocks をストリングリストで編集可能にする
- *
- * 注意:
- * - ConfigManager に public String languageOverride = ""; を追加してください（"" = 自動）。
+ * - 「Detect common ores」トグルを設置：保存時のコールバックでよくある鉱石IDを extraOreBlocks に追加する。
  */
 public class ClothConfigScreen {
     // 内部 enum（Cloth の startEnumSelector に渡すため）
     private enum LanguageOption {
-        AUTO, // corresponds to ""
-        EN_US, // "en_us"
-        JA_JP  // "ja_jp"
+        AUTO(""),
+        EN_US("en_us"),
+        JA_JP("ja_jp");
+
+        private final String code;
+        LanguageOption(String code) { this.code = code; }
+        public String code() { return code; }
+
+        public static LanguageOption fromString(String s) {
+            if (s == null || s.trim().isEmpty()) return AUTO;
+            String v = s.toLowerCase(Locale.ROOT);
+            for (LanguageOption o : values()) {
+                if (o.code.equalsIgnoreCase(v)) return o;
+            }
+            return AUTO;
+        }
     }
 
-    // 簡易辞書: override が入っている場合に UI テキストをこちらの辞書で返す
     private static final Map<String, Map<String, String>> BUILTIN_LOCALES = new HashMap<>();
 
     static {
@@ -45,6 +53,7 @@ public class ClothConfigScreen {
         en.put("text.ore_picker.config.lang_empty", "Follow game language");
         en.put("text.ore_picker.config.lang_en", "English (en_us)");
         en.put("text.ore_picker.config.lang_ja", "Japanese (ja_jp)");
+        en.put("text.ore_picker.config.detect_ores", "Detect common ores and add to list");
 
         Map<String, String> ja = new HashMap<>();
         ja.put("text.ore_picker.config.title", "Ore Picker 設定");
@@ -59,12 +68,12 @@ public class ClothConfigScreen {
         ja.put("text.ore_picker.config.lang_empty", "ゲーム設定に従う");
         ja.put("text.ore_picker.config.lang_en", "英語 (en_us)");
         ja.put("text.ore_picker.config.lang_ja", "日本語 (ja_jp)");
+        ja.put("text.ore_picker.config.detect_ores", "よくある鉱石を検出して追加する");
 
         BUILTIN_LOCALES.put("en_us", en);
         BUILTIN_LOCALES.put("ja_jp", ja);
     }
 
-    // トランスレータ：Config の override を見て適切に Text を返す
     private static Text tr(ConfigManager cfg, String key) {
         if (cfg != null && cfg.languageOverride != null && !cfg.languageOverride.isEmpty()) {
             String lang = cfg.languageOverride.toLowerCase(Locale.ROOT);
@@ -72,44 +81,14 @@ public class ClothConfigScreen {
             if (map != null && map.containsKey(key)) {
                 return Text.literal(map.get(key));
             } else {
-                // フォールバックは translatable（ゲーム言語）
                 return Text.translatable(key);
             }
         }
-        // デフォルトはゲームの言語に従う
         return Text.translatable(key);
-    }
-
-    // helper: convert string in config to enum
-    private static LanguageOption languageOptionFromString(String s) {
-        if (s == null || s.trim().isEmpty()) return LanguageOption.AUTO;
-        s = s.toLowerCase(Locale.ROOT);
-        switch (s) {
-            case "en_us":
-            case "en":
-                return LanguageOption.EN_US;
-            case "ja_jp":
-            case "ja":
-                return LanguageOption.JA_JP;
-            default:
-                return LanguageOption.AUTO;
-        }
-    }
-
-    // helper: convert enum to string saved in config
-    private static String languageOptionToString(LanguageOption o) {
-        if (o == null) return "";
-        switch (o) {
-            case EN_US: return "en_us";
-            case JA_JP: return "ja_jp";
-            case AUTO:
-            default:    return "";
-        }
     }
 
     public static void open(Screen parent) {
         try {
-            // ConfigManager 初期化
             if (ConfigManager.INSTANCE == null) {
                 try {
                     ConfigManager.load();
@@ -172,19 +151,17 @@ public class ClothConfigScreen {
                     .build());
 
             // --- language override (enum-based selector) ---
-            LanguageOption currentLangOpt = languageOptionFromString(cfgMgr.languageOverride);
+            LanguageOption currentLangOpt = LanguageOption.fromString(cfgMgr.languageOverride);
             general.addEntry(entryBuilder
                     .startEnumSelector(tr(cfgMgr, "text.ore_picker.config.languageOverride"), LanguageOption.class, currentLangOpt)
                     .setDefaultValue(LanguageOption.AUTO)
                     .setEnumNameProvider(opt -> {
-                        switch (opt) {
-                            case EN_US: return tr(cfgMgr, "text.ore_picker.config.lang_en").getString();
-                            case JA_JP: return tr(cfgMgr, "text.ore_picker.config.lang_ja").getString();
-                            case AUTO:
-                            default:    return tr(cfgMgr, "text.ore_picker.config.lang_empty").getString();
-                        }
+                        if (opt == null) return tr(cfgMgr, "text.ore_picker.config.lang_empty");
+                        if (opt == LanguageOption.EN_US) return tr(cfgMgr, "text.ore_picker.config.lang_en");
+                        if (opt == LanguageOption.JA_JP) return tr(cfgMgr, "text.ore_picker.config.lang_ja");
+                        return tr(cfgMgr, "text.ore_picker.config.lang_empty");
                     })
-                    .setSaveConsumer((LanguageOption v) -> cfgMgr.languageOverride = languageOptionToString(v))
+                    .setSaveConsumer((LanguageOption v) -> cfgMgr.languageOverride = (v == null ? "" : v.code()))
                     .build());
 
             // --- extraOreBlocks: List editor（Cloth のストリングリストエントリを使用） ---
@@ -193,12 +170,30 @@ public class ClothConfigScreen {
                     .startStrList(tr(cfgMgr, "text.ore_picker.config.extraOreBlocks"), extraList)
                     .setDefaultValue(Collections.emptyList())
                     .setSaveConsumer((List<String> v) -> {
-                        // 保存時に ConfigManager.extraOreBlocks をカンマ区切り文字列として保存
                         if (v == null || v.isEmpty()) {
                             cfgMgr.extraOreBlocks = "";
                         } else {
                             String joined = String.join(", ", v);
                             cfgMgr.extraOreBlocks = joined;
+                        }
+                    })
+                    .build());
+
+            // --- Detect common ores (action) ---
+            general.addEntry(entryBuilder
+                    .startBooleanToggle(tr(cfgMgr, "text.ore_picker.config.detect_ores"), false)
+                    .setSaveConsumer((Boolean v) -> {
+                        if (v != null && v) {
+                            // ユーザーがトグルを ON にしたときに一度だけ検出を実行して extraOreBlocks に追加する
+                            List<String> detected = detectCommonOreIds();
+                            // merge with existing
+                            List<String> existing = parseCommaSeparated(cfgMgr.extraOreBlocks);
+                            Set<String> merged = new LinkedHashSet<>(existing);
+                            merged.addAll(detected);
+                            cfgMgr.extraOreBlocks = String.join(", ", merged);
+                            try {
+                                cfgMgr.saveToFile();
+                            } catch (Throwable ignored) {}
                         }
                     })
                     .build());
@@ -217,6 +212,33 @@ public class ClothConfigScreen {
             System.err.println("[OrePicker] Failed to open Cloth Config screen (is cloth-config present?).");
             t.printStackTrace();
         }
+    }
+
+    // 簡易検出: バニラでよくある鉱石ID を返す（存在チェックは行わない。必要なら Registry 走査に差し替え可）
+    private static List<String> detectCommonOreIds() {
+        String[] ids = {
+                "minecraft:coal_ore",
+                "minecraft:iron_ore",
+                "minecraft:copper_ore",
+                "minecraft:gold_ore",
+                "minecraft:diamond_ore",
+                "minecraft:lapis_ore",
+                "minecraft:nether_quartz_ore",
+                "minecraft:redstone_ore",
+                "minecraft:emerald_ore",
+                // deepslate variants
+                "minecraft:deepslate_coal_ore",
+                "minecraft:deepslate_iron_ore",
+                "minecraft:deepslate_copper_ore",
+                "minecraft:deepslate_gold_ore",
+                "minecraft:deepslate_diamond_ore",
+                "minecraft:deepslate_lapis_ore",
+                "minecraft:deepslate_redstone_ore",
+                "minecraft:deepslate_emerald_ore"
+        };
+        List<String> out = new ArrayList<>();
+        for (String s : ids) out.add(s);
+        return out;
     }
 
     private static List<String> parseCommaSeparated(String s) {
