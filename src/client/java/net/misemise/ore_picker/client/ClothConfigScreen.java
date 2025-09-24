@@ -8,16 +8,16 @@ import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.ConfirmScreen;
 import net.minecraft.text.Text;
 import net.misemise.ore_picker.config.ConfigManager;
+import net.minecraft.util.Identifier;
+import net.minecraft.registry.Registries;
+import net.minecraft.block.Block;
 
 import java.util.*;
 
 /**
- * Cloth Config を用いた設定画面（簡易オート追加ボタンを追加した版）。
- *
- * - 「Detect common ores」トグルを設置：保存時のコールバックでよくある鉱石IDを extraOreBlocks に追加する。
+ * Cloth Config screen (with requirePickaxe / applyInCreative toggles)
  */
 public class ClothConfigScreen {
-    // 内部 enum（Cloth の startEnumSelector に渡すため）
     private enum LanguageOption {
         AUTO(""),
         EN_US("en_us"),
@@ -54,6 +54,10 @@ public class ClothConfigScreen {
         en.put("text.ore_picker.config.lang_en", "English (en_us)");
         en.put("text.ore_picker.config.lang_ja", "Japanese (ja_jp)");
         en.put("text.ore_picker.config.detect_ores", "Detect common ores and add to list");
+        en.put("text.ore_picker.config.add_by_id", "Add block ID to list (modid:block_name)");
+        en.put("text.ore_picker.config.add_by_mod", "Add all blocks from mod id (modid)");
+        en.put("text.ore_picker.config.require_pickaxe", "Require pickaxe for vein mining");
+        en.put("text.ore_picker.config.apply_in_creative", "Apply in Creative mode");
 
         Map<String, String> ja = new HashMap<>();
         ja.put("text.ore_picker.config.title", "Ore Picker 設定");
@@ -69,6 +73,10 @@ public class ClothConfigScreen {
         ja.put("text.ore_picker.config.lang_en", "英語 (en_us)");
         ja.put("text.ore_picker.config.lang_ja", "日本語 (ja_jp)");
         ja.put("text.ore_picker.config.detect_ores", "よくある鉱石を検出して追加する");
+        ja.put("text.ore_picker.config.add_by_id", "ブロックIDを追加 (modid:block_name)");
+        ja.put("text.ore_picker.config.add_by_mod", "modid のブロックをすべて追加 (modid)");
+        ja.put("text.ore_picker.config.require_pickaxe", "一括破壊はつるはしのみ許可");
+        ja.put("text.ore_picker.config.apply_in_creative", "クリエイティブでも適用する");
 
         BUILTIN_LOCALES.put("en_us", en);
         BUILTIN_LOCALES.put("ja_jp", ja);
@@ -150,11 +158,26 @@ public class ClothConfigScreen {
                     .setDefaultValue(false)
                     .build());
 
+            // --- requirePickaxeForVein (new) ---
+            general.addEntry(entryBuilder
+                    .startBooleanToggle(tr(cfgMgr, "text.ore_picker.config.require_pickaxe"), cfgMgr.requirePickaxeForVein)
+                    .setSaveConsumer((Boolean v) -> cfgMgr.requirePickaxeForVein = v)
+                    .setDefaultValue(true)
+                    .build());
+
+            // --- applyInCreative (new) ---
+            general.addEntry(entryBuilder
+                    .startBooleanToggle(tr(cfgMgr, "text.ore_picker.config.apply_in_creative"), cfgMgr.applyInCreative)
+                    .setSaveConsumer((Boolean v) -> cfgMgr.applyInCreative = v)
+                    .setDefaultValue(false)
+                    .build());
+
             // --- language override (enum-based selector) ---
             LanguageOption currentLangOpt = LanguageOption.fromString(cfgMgr.languageOverride);
             general.addEntry(entryBuilder
                     .startEnumSelector(tr(cfgMgr, "text.ore_picker.config.languageOverride"), LanguageOption.class, currentLangOpt)
                     .setDefaultValue(LanguageOption.AUTO)
+                    // Cloth expects a Text-returning provider in this environment; return Text objects.
                     .setEnumNameProvider(opt -> {
                         if (opt == null) return tr(cfgMgr, "text.ore_picker.config.lang_empty");
                         if (opt == LanguageOption.EN_US) return tr(cfgMgr, "text.ore_picker.config.lang_en");
@@ -164,7 +187,7 @@ public class ClothConfigScreen {
                     .setSaveConsumer((LanguageOption v) -> cfgMgr.languageOverride = (v == null ? "" : v.code()))
                     .build());
 
-            // --- extraOreBlocks: List editor（Cloth のストリングリストエントリを使用） ---
+            // --- extraOreBlocks: List editor ---
             List<String> extraList = parseCommaSeparated(cfgMgr.extraOreBlocks);
             general.addEntry(entryBuilder
                     .startStrList(tr(cfgMgr, "text.ore_picker.config.extraOreBlocks"), extraList)
@@ -184,24 +207,93 @@ public class ClothConfigScreen {
                     .startBooleanToggle(tr(cfgMgr, "text.ore_picker.config.detect_ores"), false)
                     .setSaveConsumer((Boolean v) -> {
                         if (v != null && v) {
-                            // ユーザーがトグルを ON にしたときに一度だけ検出を実行して extraOreBlocks に追加する
                             List<String> detected = detectCommonOreIds();
-                            // merge with existing
                             List<String> existing = parseCommaSeparated(cfgMgr.extraOreBlocks);
                             Set<String> merged = new LinkedHashSet<>(existing);
                             merged.addAll(detected);
                             cfgMgr.extraOreBlocks = String.join(", ", merged);
-                            try {
-                                cfgMgr.saveToFile();
-                            } catch (Throwable ignored) {}
                         }
                     })
                     .build());
 
-            // 保存処理
+            // --- Add by ID (text field) ---
+            general.addEntry(entryBuilder
+                    .startTextField(tr(cfgMgr, "text.ore_picker.config.add_by_id"), cfgMgr.tempAddById == null ? "" : cfgMgr.tempAddById)
+                    .setDefaultValue("")
+                    .setSaveConsumer(s -> {
+                        try {
+                            cfgMgr.tempAddById = (s == null ? "" : s);
+                        } catch (Throwable ignored) {}
+                    })
+                    .build());
+
+            // --- Add all from mod id (text field) ---
+            general.addEntry(entryBuilder
+                    .startTextField(tr(cfgMgr, "text.ore_picker.config.add_by_mod"), cfgMgr.tempAddByMod == null ? "" : cfgMgr.tempAddByMod)
+                    .setDefaultValue("")
+                    .setSaveConsumer(s -> {
+                        try {
+                            cfgMgr.tempAddByMod = (s == null ? "" : s);
+                        } catch (Throwable ignored) {}
+                    })
+                    .build());
+
+            // 保存時処理：AddById / AddByMod が埋まっていればそれらを処理してから保存する
             builder.setSavingRunnable(() -> {
                 try {
-                    cfgMgr.saveToFile();
+                    // tempAddById があれば追加
+                    try {
+                        if (cfgMgr.tempAddById != null && !cfgMgr.tempAddById.trim().isEmpty()) {
+                            String entered = cfgMgr.tempAddById.trim();
+                            if (!entered.contains(":")) entered = "minecraft:" + entered;
+                            List<String> existing = parseCommaSeparated(cfgMgr.extraOreBlocks);
+                            Set<String> merged = new LinkedHashSet<>(existing);
+                            merged.add(entered);
+                            cfgMgr.extraOreBlocks = String.join(", ", merged);
+                            // clear temp
+                            cfgMgr.tempAddById = "";
+                        }
+                    } catch (Throwable ignored) {}
+
+                    // tempAddByMod があれば mod のブロックを追加
+                    try {
+                        if (cfgMgr.tempAddByMod != null && !cfgMgr.tempAddByMod.trim().isEmpty()) {
+                            String modid = cfgMgr.tempAddByMod.trim().toLowerCase(Locale.ROOT);
+                            // enumerate Registries.BLOCK IDs
+                            try {
+                                for (Identifier id : Registries.BLOCK.getIds()) {
+                                    if (id.getNamespace().equals(modid)) {
+                                        List<String> existing = parseCommaSeparated(cfgMgr.extraOreBlocks);
+                                        Set<String> merged = new LinkedHashSet<>(existing);
+                                        merged.add(id.toString());
+                                        cfgMgr.extraOreBlocks = String.join(", ", merged);
+                                    }
+                                }
+                            } catch (Throwable t) {
+                                // fallback: iterate values
+                                try {
+                                    for (Block b : Registries.BLOCK) {
+                                        try {
+                                            Identifier id = Registries.BLOCK.getId(b);
+                                            if (id != null && id.getNamespace().equals(modid)) {
+                                                List<String> existing = parseCommaSeparated(cfgMgr.extraOreBlocks);
+                                                Set<String> merged = new LinkedHashSet<>(existing);
+                                                merged.add(id.toString());
+                                                cfgMgr.extraOreBlocks = String.join(", ", merged);
+                                            }
+                                        } catch (Throwable ignored) {}
+                                    }
+                                } catch (Throwable ex) {
+                                    ex.printStackTrace();
+                                }
+                            }
+                            // clear temp
+                            cfgMgr.tempAddByMod = "";
+                        }
+                    } catch (Throwable ignored) {}
+
+                    // 最終保存
+                    try { cfgMgr.saveToFile(); } catch (Throwable e) { e.printStackTrace(); }
                 } catch (Throwable t) {
                     t.printStackTrace();
                 }
@@ -214,7 +306,6 @@ public class ClothConfigScreen {
         }
     }
 
-    // 簡易検出: バニラでよくある鉱石ID を返す（存在チェックは行わない。必要なら Registry 走査に差し替え可）
     private static List<String> detectCommonOreIds() {
         String[] ids = {
                 "minecraft:coal_ore",
@@ -226,7 +317,6 @@ public class ClothConfigScreen {
                 "minecraft:nether_quartz_ore",
                 "minecraft:redstone_ore",
                 "minecraft:emerald_ore",
-                // deepslate variants
                 "minecraft:deepslate_coal_ore",
                 "minecraft:deepslate_iron_ore",
                 "minecraft:deepslate_copper_ore",

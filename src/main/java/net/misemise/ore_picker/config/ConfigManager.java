@@ -44,6 +44,16 @@ public final class ConfigManager {
     // 例: public String extraOreBlocks = "";
     public String languageOverride = ""; // "" = follow game, or "en_us", "ja_jp" to force
 
+    // UI の一時保持フィールド（Cloth 画面で使う）
+    public String tempAddById = "";
+    public String tempAddByMod = "";
+
+    // 動作制御
+    // true = 鉱石の一括破壊はツールが Pickaxe のときのみ有効（デフォルト true）
+    public boolean requirePickaxeForVein = true;
+    // true = クリエイティブでも一括破壊を適用（デフォルト false）
+    public boolean applyInCreative = false;
+
     private ConfigManager() {
         configDirPath = Paths.get(CONFIG_DIR);
         configFilePath = configDirPath.resolve(CONFIG_NAME);
@@ -97,11 +107,20 @@ public final class ConfigManager {
         this.extraOreBlocks = p.getProperty("extraOreBlocks", this.extraOreBlocks);
         this.debug = parseBoolean(p.getProperty("debug"), this.debug);
 
+        // 新しく永続化した項目
+        this.languageOverride = p.getProperty("languageOverride", this.languageOverride);
+        this.requirePickaxeForVein = parseBoolean(p.getProperty("requirePickaxeForVein"), this.requirePickaxeForVein);
+        this.applyInCreative = parseBoolean(p.getProperty("applyInCreative"), this.applyInCreative);
+
         System.out.println("[OrePicker] ConfigManager: reloaded config (maxVeinSize=" + this.maxVeinSize
                 + ", maxVeinSizeCap=" + this.maxVeinSizeCap
                 + ", autoCollectEnabled=" + this.autoCollectEnabled
                 + ", pickupRadius=" + this.pickupRadius
-                + ", debug=" + this.debug + ")");
+                + ", debug=" + this.debug
+                + ", languageOverride=" + this.languageOverride
+                + ", requirePickaxeForVein=" + this.requirePickaxeForVein
+                + ", applyInCreative=" + this.applyInCreative
+                + ")");
 
         for (Runnable r : listeners) {
             try {
@@ -119,6 +138,11 @@ public final class ConfigManager {
         p.setProperty("pickupRadius", Double.toString(this.pickupRadius));
         p.setProperty("extraOreBlocks", this.extraOreBlocks == null ? "" : this.extraOreBlocks);
         p.setProperty("debug", Boolean.toString(this.debug));
+
+        // 新しく永続化する項目
+        p.setProperty("languageOverride", this.languageOverride == null ? "" : this.languageOverride);
+        p.setProperty("requirePickaxeForVein", Boolean.toString(this.requirePickaxeForVein));
+        p.setProperty("applyInCreative", Boolean.toString(this.applyInCreative));
 
         try (BufferedWriter writer = Files.newBufferedWriter(configFilePath, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
             p.store(writer, "OrePicker configuration");

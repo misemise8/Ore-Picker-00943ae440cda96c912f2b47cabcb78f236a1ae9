@@ -3,6 +3,7 @@ package net.misemise.ore_picker;
 import net.misemise.ore_picker.config.ConfigManager;
 import net.minecraft.block.BlockState;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.PickaxeItem;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -17,7 +18,11 @@ import java.util.UUID;
  * - スケジュール時点でプレイヤーのメインハンドツールをコピーして保持します。
  * - processPending() 内で AutoCollect と VeinMiner を呼び出す際にそのツールを渡します。
  *
- * 追加: サーバー側の安全上限 HARD_VEIN_CAP を導入し、クライアント/ローカル設定の改竄による過剰破壊を防ぐ。
+ * 追加:
+ * - サーバー側の安全上限 HARD_VEIN_CAP を導入（クライアントの改竄防止）
+ * - Vein 実行前に必ず OreUtils.isOre(state) を確認
+ * - 必要に応じて「つるはしのみで実行（requirePickaxeForVein）」のチェックを行う
+ * - クリエイティブ適用は ConfigManager.applyInCreative で制御
  */
 public final class CollectScheduler {
     private CollectScheduler() {}
@@ -131,7 +136,7 @@ public final class CollectScheduler {
 
         try {
             if (sc.state != null && sc.world != null && player != null) {
-                // toolStack を渡して AutoCollect を呼ぶ
+                // toolStack を渡して AutoCollect を呼ぶ（AutoCollectHandler 内でも isOre 判定あり）
                 AutoCollectHandler.collectDrops(sc.world, player, sc.pos, sc.state, sc.toolStack);
             }
         } catch (Throwable t) {
@@ -140,6 +145,65 @@ public final class CollectScheduler {
 
         try {
             if (sc.allowVein && sc.world != null && player != null) {
+                // ----- 鉱石判定 -----
+                boolean isOre = false;
+                try { isOre = net.misemise.ore_picker.OreUtils.isOre(sc.state); } catch (Throwable ignored) {}
+                if (!isOre) {
+                    // 非鉱石なら Vein を行わない
+                    return;
+                }
+
+                // ----- クリエイティブ適用チェック -----
+                boolean applyInCreative = false;
+                try {
+                    if (ConfigManager.INSTANCE != null) applyInCreative = ConfigManager.INSTANCE.applyInCreative;
+                } catch (Throwable ignored) {}
+                if (!applyInCreative) {
+                    try {
+                        if (player.interactionManager != null && player.interactionManager.getGameMode().isCreative()) {
+                            // Player がクリエイティブかつ設定でクリエイティブ無効 → スキップ
+                            return;
+                        }
+                        // 上の API は mappings/MCバージョンにより無い場合もあるが、失敗しても次でプレイヤーの isCreative を使う
+                    } catch (Throwable ignored) {
+                        try {
+                            if (player.isCreative()) return;
+                        } catch (Throwable ignored2) {}
+                    }
+                }
+
+                // ----- ツール条件（つるはしのみ）チェック -----
+                boolean requirePickaxe = true; // デフォルト true
+                try {
+                    if (ConfigManager.INSTANCE != null) requirePickaxe = ConfigManager.INSTANCE.requirePickaxeForVein;
+                } catch (Throwable ignored) {}
+
+                if (requirePickaxe) {
+                    boolean hasPickaxe = false;
+                    try {
+                        ItemStack usedTool = sc.toolStack != null ? sc.toolStack : player.getMainHandStack();
+                        if (usedTool != null) {
+                            try {
+                                if (usedTool.getItem() instanceof PickaxeItem) {
+                                    hasPickaxe = true;
+                                } else {
+                                    // フォールバック: アイテムのクラス名に "Pickaxe" を含むかで判定
+                                    try {
+                                        String cls = usedTool.getItem().getClass().getSimpleName().toLowerCase();
+                                        if (cls.contains("pickaxe") || cls.contains("pickaxeitem")) hasPickaxe = true;
+                                    } catch (Throwable ignored) {}
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                    } catch (Throwable ignored) {}
+
+                    if (!hasPickaxe) {
+                        // ツールがつるはしでないなら Vein を行わない
+                        return;
+                    }
+                }
+
+                // ----- limit (config + cap) -----
                 int configured = (ConfigManager.INSTANCE != null) ? ConfigManager.INSTANCE.maxVeinSize : 64;
                 try {
                     if (ConfigManager.INSTANCE != null) {
@@ -149,7 +213,6 @@ public final class CollectScheduler {
                 } catch (Throwable ignored) {}
 
                 int limit = Math.max(0, configured);
-
                 // サーバー側ハード上限を適用（クライアント側設定の改竄保護）
                 limit = Math.min(limit, HARD_VEIN_CAP);
 
