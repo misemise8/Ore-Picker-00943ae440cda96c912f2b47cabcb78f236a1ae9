@@ -14,8 +14,8 @@ import net.misemise.ore_picker.network.HoldC2SPayload;
 
 /**
  * Client initializer:
- * - register (optional) codec on client side
- * - register keybind (V) and send HoldC2SPayload when toggled
+ * - register codec on client side (but ignore duplicate registration quietly)
+ * - keybind + send hold payload
  * - expose localHold for HUD to read
  */
 public class Ore_pickerClient implements ClientModInitializer {
@@ -27,10 +27,13 @@ public class Ore_pickerClient implements ClientModInitializer {
     public void onInitializeClient() {
         System.out.println("[OrePickerClient] client init: registering codec (client side) + keybind");
 
-        // register codec on client side playC2S too — some environments require codec present on both sides
+        // register codec on client side playC2S — ignore duplicate registration
         try {
             PayloadTypeRegistry.playC2S().register(HoldC2SPayload.TYPE, HoldC2SPayload.CODEC);
             System.out.println("[OrePickerClient] Registered HoldC2SPayload codec on client side");
+        } catch (IllegalArgumentException e) {
+            // already registered: suppress noisy stack trace
+            System.out.println("[OrePickerClient] HoldC2SPayload already registered on client side (ignored).");
         } catch (Throwable t) {
             System.err.println("[OrePickerClient] Could not register codec on client side (non-fatal):");
             t.printStackTrace();
@@ -63,12 +66,10 @@ public class Ore_pickerClient implements ClientModInitializer {
     private static void sendHoldPayload(boolean pressed) {
         try {
             HoldC2SPayload payload = new HoldC2SPayload(pressed);
-            // Use ClientPlayNetworking.send(CustomPayload) — available in modern Fabric client API
             ClientPlayNetworking.send(payload);
         } catch (Throwable t) {
             System.err.println("[OrePickerClient] Failed to send HoldC2SPayload via ClientPlayNetworking.send(payload).");
             t.printStackTrace();
-            // fallback: if necessary we could send PacketByteBuf raw here — but avoid unless needed
         }
     }
 }

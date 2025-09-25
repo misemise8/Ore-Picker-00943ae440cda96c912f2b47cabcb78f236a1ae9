@@ -1,34 +1,107 @@
 package net.misemise.ore_picker.client;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
-
-import net.misemise.ore_picker.config.ConfigManager;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.text.Text;
+import net.misemise.ore_picker.config.ConfigManager;
+
+import java.lang.reflect.*;
+import java.util.Locale;
+import java.util.function.Function;
 
 /**
- * HoldHudOverlay - reflection-first implementation (no compile-time dependency on DrawContext/TextRenderer)
+ * HoldHudOverlay - 修正版
  *
- * - HudRenderCallback.EVENT をリフレクションで取得して登録する（DrawContext / MatrixStack の差を吸収）
- * - TextRenderer の複数の draw/drawWithShadow シグネチャに対応して描画する（すべて reflection）
- * - Ore_pickerClient.localHold をリフレクション/直接参照して判定（client パッケージ / top-level の両方対応）
- *
- * これにより、ラムダの型不一致や TextRenderer のシグネチャ差でのコンパイルエラーを防ぎます。
+ * - フェードは時間ベース（2秒）で行い、アルファではなく RGB を暗くして見た目のフェードにする
+ * - Draw-hook を反射で登録（成功すれば DrawContext 経路を使う）
+ * - DrawContext 経路では 1.2x スケーリングを試みる
+ * - setOverlayMessage のフォールバックも残す（色は近似）
  */
 public final class HoldHudOverlay {
     private HoldHudOverlay() {}
 
+    // フェード時間（ミリ秒）
+    private static final long FADE_MS = 2000L;
+
+    // 基本の黄緑 RGB
+    private static final int BASE_R = 0x9A;
+    private static final int BASE_G = 0xFF;
+    private static final int BASE_B = 0x66;
+
+    // scale for DrawContext path (1.2x)
+    private static final float SCALE = 1.2f;
+
+    // last change tracking (時間ベース)
+    private static volatile boolean lastHoldState = false;
+    private static volatile long lastHoldChangeTime = System.currentTimeMillis();
+
     public static void register() {
+        boolean drawHookRegistered = tryRegisterDrawHook();
+        if (drawHookRegistered) {
+            System.out.println("[OrePicker] HUD overlay registered (draw-hook).");
+            return;
+        }
+
+        // tick-based fallback (テスト用かつ互換用)
         try {
-            // HudRenderCallback を反射で取得
+            ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                try {
+                    if (client == null) return;
+                    try { if (ConfigManager.INSTANCE != null && !ConfigManager.INSTANCE.enableHudOverlay) return; } catch (Throwable ignored) {}
+
+                    boolean hold = Ore_pickerClient.localHold;
+                    updateHoldState(hold);
+
+                    float opacity = computeOpacity();
+
+                    if (opacity <= 0f) return;
+
+                    int r = Math.max(0, Math.min(255, (int) (BASE_R * opacity)));
+                    int g = Math.max(0, Math.min(255, (int) (BASE_G * opacity)));
+                    int b = Math.max(0, Math.min(255, (int) (BASE_B * opacity)));
+                    int rgbScaled = (r << 16) | (g << 8) | b;
+
+                    // フォールバック: inGameHud#setOverlayMessage(Text, boolean) を色付き Text で試す
+                    Object inGameHud = client.inGameHud;
+                    if (inGameHud != null) {
+                        String s = "OrePicker: Running";
+                        trySetOverlayMessageWithColor(inGameHud, s, rgbScaled);
+                    }
+                } catch (Throwable t) {
+                    try { if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) t.printStackTrace(); } catch (Throwable ignored) {}
+                }
+            });
+
+            System.out.println("[OrePicker] HUD overlay registered (tick-based).");
+        } catch (Throwable t) {
+            System.err.println("[OrePicker] Failed to register HUD overlay (both draw-hook and tick-based). HUD disabled.");
+            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) t.printStackTrace();
+        }
+    }
+
+    // update hold state/time
+    private static void updateHoldState(boolean hold) {
+        if (hold != lastHoldState) {
+            lastHoldState = hold;
+            lastHoldChangeTime = System.currentTimeMillis();
+        }
+    }
+
+    // compute opacity based on last change time (1.0 .. 0.0)
+    private static float computeOpacity() {
+        if (lastHoldState) return 1.0f;
+        long elapsed = System.currentTimeMillis() - lastHoldChangeTime;
+        if (elapsed >= FADE_MS) return 0f;
+        return 1.0f - (float) elapsed / (float) FADE_MS;
+    }
+
+    // ---------------- Draw-hook registration ----------------
+    private static boolean tryRegisterDrawHook() {
+        try {
             Class<?> hudCallbackCls = Class.forName("net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback");
             Field eventField = hudCallbackCls.getField("EVENT");
             Object eventObj = eventField.get(null);
 
-            // EVENT.register(listener) を探す
             Method registerMethod = null;
             for (Method m : eventObj.getClass().getMethods()) {
                 if ("register".equals(m.getName()) && m.getParameterCount() == 1) {
@@ -37,304 +110,304 @@ public final class HoldHudOverlay {
                 }
             }
             if (registerMethod == null) {
-                System.err.println("[OrePicker] HudRenderCallback.EVENT.register(...) not found - HUD disabled.");
-                return;
+                if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                    System.err.println("[OrePicker] HudRenderCallback.EVENT.register(...) not found - draw-hook disabled.");
+                }
+                return false;
             }
 
             Class<?> listenerType = registerMethod.getParameterTypes()[0];
+            if (!listenerType.isInterface()) {
+                if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                    System.err.println("[OrePicker] HudRenderCallback listener type is not an interface; cannot create proxy.");
+                }
+                return false;
+            }
 
-            // 動的プロキシでリスナーを作る（ラムダの型不一致を避ける）
             Object listenerProxy = Proxy.newProxyInstance(
                     listenerType.getClassLoader(),
                     new Class<?>[]{listenerType},
                     new InvocationHandler() {
-                        // キャッシュ用
-                        volatile Field clientTextField = null;
-                        volatile Method clientGetTextMethod = null;
-                        volatile Method textRendererGetWidthText = null;
-                        volatile Method textRendererGetWidthString = null;
-                        volatile Method preferredDrawMethod = null;
-                        volatile Method drawContextDrawMethod = null;
-
                         @Override
                         public Object invoke(Object proxy, Method method, Object[] args) {
                             try {
                                 if (args == null || args.length == 0) return null;
+                                try { if (ConfigManager.INSTANCE != null && !ConfigManager.INSTANCE.enableHudOverlay) return null; } catch (Throwable ignored) {}
 
-                                // Config を確認（存在しなければロード）
-                                if (ConfigManager.INSTANCE == null) {
-                                    try { ConfigManager.load(); } catch (Throwable ignored) {}
-                                }
-                                if (ConfigManager.INSTANCE != null && !ConfigManager.INSTANCE.enableHudOverlay) return null;
+                                boolean hold = Ore_pickerClient.localHold;
+                                updateHoldState(hold);
 
-                                // localHold を確認（client パッケージ / top-level の両方を試す）
-                                boolean localHold = false;
-                                try {
-                                    // client package
-                                    try {
-                                        Class<?> cls = Class.forName("net.misemise.ore_picker.client.Ore_pickerClient");
-                                        try {
-                                            java.lang.reflect.Field f = cls.getField("localHold");
-                                            Object v = f.get(null);
-                                            localHold = Boolean.TRUE.equals(v);
-                                        } catch (Throwable ignored) {}
-                                    } catch (Throwable ignored) {}
-
-                                    // fallback top-level
-                                    if (!localHold) {
-                                        try {
-                                            Class<?> cls2 = Class.forName("net.misemise.ore_picker.Ore_pickerClient");
-                                            try {
-                                                java.lang.reflect.Field f2 = cls2.getField("localHold");
-                                                Object v2 = f2.get(null);
-                                                localHold = Boolean.TRUE.equals(v2);
-                                            } catch (Throwable ignored) {}
-                                        } catch (Throwable ignored) {}
-                                    }
-                                } catch (Throwable t) { localHold = false; }
-
-                                if (!localHold) return null;
+                                float opacity = computeOpacity();
+                                if (opacity <= 0f) return null;
 
                                 MinecraftClient client = MinecraftClient.getInstance();
                                 if (client == null) return null;
 
-                                // ローカライズされた文字列を取得（Text.translatable -> getString）
-                                String msgStr = "OrePicker: Active";
-                                try {
-                                    Text t = Text.translatable("hud.ore_picker.active");
-                                    msgStr = t.getString();
-                                } catch (Throwable ignored) {}
+                                String textStr = "OrePicker: Running";
 
-                                Text msgText = Text.literal(msgStr);
+                                int r = Math.max(0, Math.min(255, (int) (BASE_R * opacity)));
+                                int g = Math.max(0, Math.min(255, (int) (BASE_G * opacity)));
+                                int b = Math.max(0, Math.min(255, (int) (BASE_B * opacity)));
+                                int rgbScaled = (r << 16) | (g << 8) | b;
 
-                                // textRenderer オブジェクトを反射で取得する
-                                Object tr = resolveTextRenderer(client);
-                                if (tr == null) {
-                                    // なんらかの理由で取得できなければ描画せずに戻る
-                                    return null;
-                                }
-
-                                // ウィンドウサイズ
-                                int sw = client.getWindow().getScaledWidth();
-                                int sh = client.getWindow().getScaledHeight();
-
-                                int textWidth = getTextWidth(tr, msgText, msgStr);
-
-                                int x = sw / 2 - textWidth / 2;
-                                int y = sh - 48; // ホットバー上あたり
-
-                                // Try DrawContext path if provided in args[0]
                                 Object firstArg = args[0];
                                 if (firstArg != null) {
-                                    Method dcMethod = findDrawContextDrawText(firstArg.getClass());
-                                    if (dcMethod != null) {
-                                        try {
-                                            // 期待されるのは (TextRenderer, Text, int, int, int, boolean) 等
-                                            // できるだけ柔軟に呼び出す
-                                            try {
-                                                dcMethod.invoke(firstArg, tr, msgText, x, y, 0xFFFFFF, true);
-                                                return null;
-                                            } catch (IllegalArgumentException iae) {
-                                                try { dcMethod.invoke(firstArg, tr, msgText, (float)x, (float)y, 0xFFFFFF, true); return null; } catch (Throwable ignored) {}
-                                            }
-                                        } catch (Throwable ignored) {}
+                                    if (tryDrawWithContext(firstArg, client, textStr, rgbScaled, SCALE)) {
+                                        return null; // 描画成功
                                     }
                                 }
 
-                                // 直接 textRenderer 上の draw/drawWithShadow 系を探して呼ぶ
-                                if (preferredDrawMethod != null) {
-                                    try {
-                                        // cached method may still be valid
-                                        callPreferredDraw(preferredDrawMethod, tr, msgText, msgStr, x, y);
-                                        return null;
-                                    } catch (Throwable e) {
-                                        preferredDrawMethod = null; // invalidate cache
-                                    }
-                                }
-
-                                // 探索
-                                for (Method m : tr.getClass().getMethods()) {
-                                    String nm = m.getName();
-                                    Class<?>[] pts = m.getParameterTypes();
-                                    try {
-                                        // drawWithShadow(Text, float, float, int)
-                                        if ("drawWithShadow".equals(nm) && pts.length == 4 && Text.class.isAssignableFrom(pts[0])
-                                                && (pts[1] == float.class || pts[1] == Float.class)) {
-                                            m.invoke(tr, msgText, (float)x, (float)y, 0xFFFFFF);
-                                            preferredDrawMethod = m;
-                                            return null;
-                                        }
-                                        // drawWithShadow(String, float, float, int)
-                                        if ("drawWithShadow".equals(nm) && pts.length == 4 && pts[0] == String.class) {
-                                            m.invoke(tr, msgStr, (float)x, (float)y, 0xFFFFFF);
-                                            preferredDrawMethod = m;
-                                            return null;
-                                        }
-                                        // draw(Text, float, float, int) or draw(Text, int, int, int)
-                                        if ("draw".equals(nm) && pts.length == 4 && Text.class.isAssignableFrom(pts[0])) {
-                                            if (pts[1] == float.class || pts[1] == Float.class) {
-                                                m.invoke(tr, msgText, (float)x, (float)y, 0xFFFFFF);
-                                            } else {
-                                                m.invoke(tr, msgText, x, y, 0xFFFFFF);
-                                            }
-                                            preferredDrawMethod = m;
-                                            return null;
-                                        }
-                                        // draw(String, int, int, int)
-                                        if ("draw".equals(nm) && pts.length == 4 && pts[0] == String.class && (pts[1] == int.class || pts[1] == Integer.class)) {
-                                            m.invoke(tr, msgStr, x, y, 0xFFFFFF);
-                                            preferredDrawMethod = m;
-                                            return null;
-                                        }
-                                    } catch (Throwable inner) {
-                                        // try next
-                                    }
-                                }
-
-                                // 最後の手段: try a common method signature
-                                try {
-                                    Method fallback = tr.getClass().getMethod("drawWithShadow", String.class, float.class, float.class, int.class);
-                                    fallback.invoke(tr, msgStr, (float)x, (float)y, 0xFFFFFF);
-                                } catch (Throwable ignored) {}
-
+                                // フォールバック: inGameHud
+                                trySetOverlayViaInGameHud(client, textStr, rgbScaled);
                             } catch (Throwable t) {
-                                // swallow exceptions to avoid crashing render loop
-                                t.printStackTrace();
+                                try { if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) t.printStackTrace(); } catch (Throwable ignored) {}
                             }
                             return null;
-                        }
-
-                        private Object resolveTextRenderer(MinecraftClient client) {
-                            try {
-                                // try field "textRenderer"
-                                if (clientTextField == null) {
-                                    try {
-                                        Field f = client.getClass().getField("textRenderer");
-                                        f.setAccessible(true);
-                                        clientTextField = f;
-                                    } catch (NoSuchFieldException nsf) {
-                                        // try declared
-                                        try {
-                                            Field f2 = client.getClass().getDeclaredField("textRenderer");
-                                            f2.setAccessible(true);
-                                            clientTextField = f2;
-                                        } catch (NoSuchFieldException ignored) {
-                                            clientTextField = null;
-                                        }
-                                    }
-                                }
-                                if (clientTextField != null) {
-                                    try {
-                                        Object tr = clientTextField.get(client);
-                                        if (tr != null) return tr;
-                                    } catch (Throwable ignored) {}
-                                }
-
-                                // try method getTextRenderer()
-                                if (clientGetTextMethod == null) {
-                                    try {
-                                        Method gm = client.getClass().getMethod("getTextRenderer");
-                                        gm.setAccessible(true);
-                                        clientGetTextMethod = gm;
-                                    } catch (NoSuchMethodException ignored) { clientGetTextMethod = null; }
-                                }
-                                if (clientGetTextMethod != null) {
-                                    try {
-                                        Object tr = clientGetTextMethod.invoke(client);
-                                        if (tr != null) return tr;
-                                    } catch (Throwable ignored) {}
-                                }
-
-                                // search declared fields in class hierarchy
-                                for (Class<?> c = client.getClass(); c != null; c = c.getSuperclass()) {
-                                    try {
-                                        Field f = c.getDeclaredField("textRenderer");
-                                        f.setAccessible(true);
-                                        Object tr = f.get(client);
-                                        if (tr != null) return tr;
-                                    } catch (Throwable ignored) {}
-                                }
-                            } catch (Throwable t) {}
-                            return null;
-                        }
-
-                        private int getTextWidth(Object tr, Text textObj, String textStr) {
-                            try {
-                                if (textRendererGetWidthText == null) {
-                                    try { textRendererGetWidthText = tr.getClass().getMethod("getWidth", Text.class); } catch (NoSuchMethodException e) { textRendererGetWidthText = null; }
-                                }
-                                if (textRendererGetWidthText != null) {
-                                    try {
-                                        Object o = textRendererGetWidthText.invoke(tr, textObj);
-                                        if (o instanceof Number) return ((Number)o).intValue();
-                                    } catch (Throwable ignored) {}
-                                }
-                            } catch (Throwable ignored) {}
-
-                            try {
-                                if (textRendererGetWidthString == null) {
-                                    try { textRendererGetWidthString = tr.getClass().getMethod("getWidth", String.class); } catch (NoSuchMethodException e) { textRendererGetWidthString = null; }
-                                }
-                                if (textRendererGetWidthString != null) {
-                                    try {
-                                        Object o2 = textRendererGetWidthString.invoke(tr, textStr);
-                                        if (o2 instanceof Number) return ((Number)o2).intValue();
-                                    } catch (Throwable ignored) {}
-                                }
-                            } catch (Throwable ignored) {}
-
-                            return textStr.length() * 6;
-                        }
-
-                        private Method findDrawContextDrawText(Class<?> drawContextCls) {
-                            try {
-                                for (Method m : drawContextCls.getMethods()) {
-                                    String name = m.getName();
-                                    if (!"drawText".equals(name) && !"draw".equals(name) && !"drawTextWithShadow".equals(name)) continue;
-                                    Class<?>[] pts = m.getParameterTypes();
-                                    if (pts.length >= 5) {
-                                        boolean hasTR = false;
-                                        boolean hasText = false;
-                                        for (Class<?> p : pts) {
-                                            String pn = p.getSimpleName();
-                                            if (pn.contains("TextRenderer") || pn.contains("Font") || pn.contains("FontRenderer")) hasTR = true;
-                                            if (Text.class.isAssignableFrom(p)) hasText = true;
-                                        }
-                                        if (hasTR && hasText) return m;
-                                    }
-                                }
-                            } catch (Throwable t) {}
-                            return null;
-                        }
-
-                        private void callPreferredDraw(Method m, Object tr, Text t, String s, int x, int y) throws Exception {
-                            Class<?>[] pts = m.getParameterTypes();
-                            if (pts.length == 4) {
-                                if (pts[0] == String.class) {
-                                    m.invoke(tr, s, (float)x, (float)y, 0xFFFFFF);
-                                } else if (Text.class.isAssignableFrom(pts[0])) {
-                                    if (pts[1] == float.class) m.invoke(tr, t, (float)x, (float)y, 0xFFFFFF);
-                                    else m.invoke(tr, t, x, y, 0xFFFFFF);
-                                } else {
-                                    // fallback attempt
-                                    m.invoke(tr, s, (float)x, (float)y, 0xFFFFFF);
-                                }
-                            } else {
-                                // generic invoke try
-                                m.invoke(tr, s, (float)x, (float)y, 0xFFFFFF);
-                            }
                         }
                     }
             );
 
-            // register listener proxy
-            registerMethod.invoke(eventObj, listenerProxy);
-            System.out.println("[OrePicker] HUD overlay registered (reflection-first).");
+            try {
+                registerMethod.invoke(eventObj, listenerProxy);
+                return true;
+            } catch (InvocationTargetException ite) {
+                if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                    System.err.println("[OrePicker] draw-hook registration InvocationTargetException cause:");
+                    ite.getCause().printStackTrace();
+                }
+                return false;
+            } catch (IllegalAccessException iae) {
+                if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                    System.err.println("[OrePicker] draw-hook registration IllegalAccessException:");
+                    iae.printStackTrace();
+                }
+                return false;
+            }
         } catch (ClassNotFoundException cnf) {
-            System.err.println("[OrePicker] HudRenderCallback class not found; HUD overlay disabled.");
+            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                System.err.println("[OrePicker] HudRenderCallback class not found; draw-hook not available.");
+            }
+            return false;
         } catch (Throwable t) {
-            System.err.println("[OrePicker] Failed to register HUD overlay (unexpected).");
-            t.printStackTrace();
+            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                System.err.println("[OrePicker] Unexpected while attempting draw-hook registration:");
+                t.printStackTrace();
+            }
+            return false;
+        }
+    }
+
+    // Draw via DrawContext-like object using scaled RGB (no alpha).
+    private static boolean tryDrawWithContext(Object drawCtx, MinecraftClient client, String textStr, int rgbScaled, float scale) {
+        try {
+            // try to obtain matrices if available (push/scale/pop)
+            Object matrices = null;
+            try {
+                Method getMatrices = drawCtx.getClass().getMethod("getMatrices");
+                matrices = getMatrices.invoke(drawCtx);
+            } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException ignored) {
+                matrices = drawCtx; // そのまま MatrixStack っぽい扱い
+            }
+            Method push = null;
+            Method pop = null;
+            Method scaleMethod = null;
+            if (matrices != null) {
+                Class<?> mcls = matrices.getClass();
+                try { push = mcls.getMethod("push"); } catch (NoSuchMethodException ignored) {}
+                try { pop = mcls.getMethod("pop"); } catch (NoSuchMethodException ignored) {}
+                try { scaleMethod = mcls.getMethod("scale", float.class, float.class, float.class); } catch (NoSuchMethodException ignored) {}
+            }
+
+            if (push != null) {
+                try { push.invoke(matrices); } catch (Throwable ignored) {}
+            }
+            if (scaleMethod != null) {
+                try { scaleMethod.invoke(matrices, scale, scale, scale); } catch (Throwable ignored) {}
+            }
+
+            // 探索して最初に成功した drawText/draw を実行する
+            Method[] methods = drawCtx.getClass().getMethods();
+            for (Method m : methods) {
+                String name = m.getName().toLowerCase(Locale.ROOT);
+                if (!name.contains("draw") && !name.contains("text")) continue;
+
+                Class<?>[] pts = m.getParameterTypes();
+                // 典型パターン: (TextRenderer, String/Text/OrderedText, int x, int y, int color) [+ boolean shadow]
+                if (pts.length < 5 || pts.length > 7) continue;
+
+                Object tr = client.textRenderer;
+                if (!(pts[0].isAssignableFrom(tr.getClass()) || pts[0].isInstance(tr))) continue;
+
+                Object second = null;
+                if (pts[1] == String.class) {
+                    second = textStr;
+                } else if (isTextType(pts[1])) {
+                    try {
+                        Method literal = Text.class.getMethod("literal", String.class);
+                        second = literal.invoke(null, textStr);
+                    } catch (Throwable ignored) {}
+                } else {
+                    // try OrderedText
+                    Object ordered = tryAsOrderedText(Text.literal(textStr));
+                    if (ordered != null && pts[1].isInstance(ordered)) second = ordered;
+                }
+                if (second == null) continue;
+
+                int sw = client.getWindow().getScaledWidth();
+                int sh = client.getWindow().getScaledHeight();
+                int textWidth = tryComputeTextWidth(client, Text.literal(textStr));
+                int x = sw / 2 - (int) (textWidth * scale / 2.0f);
+                int y = (int) (sh - 50 - 8 * scale);
+
+                Object[] callArgs = new Object[pts.length];
+                callArgs[0] = tr;
+                callArgs[1] = second;
+                // common positions
+                if (pts.length >= 5) {
+                    callArgs[2] = x;
+                    callArgs[3] = y;
+                    callArgs[4] = rgbScaled;
+                }
+                if (pts.length >= 6) {
+                    Class<?> p5 = pts[5];
+                    if (p5 == boolean.class || p5 == Boolean.class) {
+                        callArgs[5] = Boolean.TRUE;
+                    } else {
+                        // 他の型なら 0 を入れてみる（安全策）
+                        callArgs[5] = 0;
+                    }
+                }
+                // invoke
+                try {
+                    m.invoke(drawCtx, callArgs);
+                    if (pop != null) {
+                        try { pop.invoke(matrices); } catch (Throwable ignored) {}
+                    }
+                    return true;
+                } catch (IllegalArgumentException iae) {
+                    // 型ミスマッチなら次を探す
+                    continue;
+                }
+            }
+
+            if (pop != null) {
+                try { pop.invoke(matrices); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) {
+            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) t.printStackTrace();
+        }
+        return false;
+    }
+
+    // try setOverlayMessage(Text, boolean) with colored Text if possible
+    private static boolean trySetOverlayMessageWithColor(Object inGameHud, String textStr, int rgbScaled) {
+        try {
+            Text t = buildColoredTextBestEffort(textStr, rgbScaled);
+            for (Method m : inGameHud.getClass().getMethods()) {
+                if (!"setOverlayMessage".equals(m.getName())) continue;
+                Class<?>[] pts = m.getParameterTypes();
+                if (pts.length == 2 && isTextType(pts[0]) && (pts[1] == boolean.class || pts[1] == Boolean.class)) {
+                    try {
+                        m.invoke(inGameHud, t, true);
+                        return true;
+                    } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable t) {
+            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                System.err.println("[OrePicker] trySetOverlayMessageWithColor failed:");
+                t.printStackTrace();
+            }
+        }
+        return false;
+    }
+
+    private static void trySetOverlayViaInGameHud(MinecraftClient client, String textStr, int rgbScaled) {
+        try {
+            Object inGameHud = client.inGameHud;
+            if (inGameHud == null) return;
+            Text t = buildColoredTextBestEffort(textStr, rgbScaled);
+            for (Method m : inGameHud.getClass().getMethods()) {
+                if (!"setOverlayMessage".equals(m.getName())) continue;
+                Class<?>[] pts = m.getParameterTypes();
+                if (pts.length == 2 && isTextType(pts[0]) && (pts[1] == boolean.class || pts[1] == Boolean.class)) {
+                    try {
+                        m.invoke(inGameHud, t, true);
+                        return;
+                    } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable ex) {
+            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                System.err.println("[OrePicker] trySetOverlayViaInGameHud failed:");
+                ex.printStackTrace();
+            }
+        }
+    }
+
+    // Build Text with color if possible; fallback to Formatting.GREEN
+    private static Text buildColoredTextBestEffort(String s, int rgbScaled) {
+        try {
+            Class<?> textColorCls = Class.forName("net.minecraft.text.TextColor");
+            Method fromRgb = textColorCls.getMethod("fromRgb", int.class);
+            Object textColor = fromRgb.invoke(null, rgbScaled);
+
+            Method literal = Text.class.getMethod("literal", String.class);
+            Text base = (Text) literal.invoke(null, s);
+
+            try {
+                Method styled = Text.class.getMethod("styled", Function.class);
+                Function<Object, Object> func = styleObj -> {
+                    try {
+                        Method withColor = styleObj.getClass().getMethod("withColor", textColorCls);
+                        return withColor.invoke(styleObj, textColor);
+                    } catch (Throwable ex) {
+                        return styleObj;
+                    }
+                };
+                return (Text) styled.invoke(base, func);
+            } catch (NoSuchMethodException ns) {
+                // fall through
+            }
+        } catch (Throwable ignored) {}
+
+        // fallback: Formatting.GREEN
+        try {
+            Text t = Text.literal(s);
+            return (Text) Text.class.getMethod("formatted", Enum.class).invoke(t, Enum.valueOf((Class<Enum>) Class.forName("net.minecraft.util.Formatting"), "GREEN"));
+        } catch (Throwable ignored) {}
+
+        return Text.literal(s);
+    }
+
+    // ---------------- helpers ----------------
+    private static boolean isTextType(Class<?> cls) {
+        if (cls == null) return false;
+        String name = cls.getName();
+        return name.equals("net.minecraft.text.Text") || name.endsWith(".Text") || name.toLowerCase(Locale.ROOT).contains("text");
+    }
+
+    private static Object tryAsOrderedText(Text label) {
+        try {
+            Method m = Text.class.getMethod("asOrderedText");
+            return m.invoke(label);
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private static int tryComputeTextWidth(MinecraftClient client, Text label) {
+        try {
+            Method getWidthStr = client.textRenderer.getClass().getMethod("getWidth", String.class);
+            return (Integer) getWidthStr.invoke(client.textRenderer, label.getString());
+        } catch (Throwable ignored) {}
+        try {
+            Method getWidthText = client.textRenderer.getClass().getMethod("getWidth", Text.class);
+            return (Integer) getWidthText.invoke(client.textRenderer, label);
+        } catch (Throwable ignored) {}
+        try {
+            return label.getString().length() * 6;
+        } catch (Throwable ignored) {
+            return 6;
         }
     }
 }
