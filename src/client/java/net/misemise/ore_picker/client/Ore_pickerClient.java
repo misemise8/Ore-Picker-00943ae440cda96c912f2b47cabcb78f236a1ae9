@@ -39,12 +39,14 @@ public class Ore_pickerClient implements ClientModInitializer {
             t.printStackTrace();
         }
 
+        // Keybind (V default)
         holdKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.orepicker.hold",
                 GLFW.GLFW_KEY_V,
                 "category.orepicker"
         ));
 
+        // Each tick, update localHold and send payload if changed
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null) return;
 
@@ -57,15 +59,24 @@ public class Ore_pickerClient implements ClientModInitializer {
             }
         });
 
-        // HUD
-        HoldHudOverlay.register();
+        // HUD: register overlay (will try Fabric HudRenderCallback; if not present, mixin should call renderOnTop)
+        try {
+            HoldHudOverlay.register();
+        } catch (Throwable t) {
+            System.err.println("[OrePickerClient] HoldHudOverlay.register() threw:");
+            t.printStackTrace();
+        }
 
-        net.misemise.ore_picker.client.ConfigScreenOpener.init();
+        // Config screen opener (if you have implemented it)
+        try {
+            net.misemise.ore_picker.client.ConfigScreenOpener.init();
+        } catch (Throwable ignored) {}
     }
 
     private static void sendHoldPayload(boolean pressed) {
         try {
             HoldC2SPayload payload = new HoldC2SPayload(pressed);
+            // Use ClientPlayNetworking.send(Object) as in your project (your HoldC2SPayload implements required interface)
             ClientPlayNetworking.send(payload);
         } catch (Throwable t) {
             System.err.println("[OrePickerClient] Failed to send HoldC2SPayload via ClientPlayNetworking.send(payload).");

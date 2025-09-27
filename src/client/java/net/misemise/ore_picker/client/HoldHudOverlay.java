@@ -9,12 +9,12 @@ import net.misemise.ore_picker.config.ConfigManager;
 import java.lang.reflect.*;
 
 /**
- * HoldHudOverlay - 修正版
+ * HoldHudOverlay - 位置修正版
  *
- * - ホールド中は不透明、離すと 1.2 秒で線形フェードアウト
- * - テキストを 1.2 倍相当で表示
- * - 深度テストを一時的に無効化してチャットより上に描画を試みる
- * - 互換性のため DrawContext / MatrixStack 系をリフレクションで試す
+ * 主な改変:
+ *  - DrawContext 経路で座標を SCALE で割っていたミスを修正（そのせいで左上に寄っていた）
+ *  - ホットバーの上に表示されるように baseBottomOffset を調整（必要なら微調整して）
+ *  - debug モードで座標/経路ログを出す
  */
 public final class HoldHudOverlay {
     private HoldHudOverlay() {}
@@ -23,8 +23,15 @@ public final class HoldHudOverlay {
     private static final float SCALE = 1.2f;
     private static final int COLOR_RGB = 0x9AFF66; // RRGGBB
 
+    // 最小可視アルファ（小さすぎると 1 バイト丸めでちらつく）
+    private static final float MIN_VISIBLE_OPACITY = 0.03f;
+
+    // hold state
     private static volatile boolean lastHold = false;
     private static volatile long lastChangeTime = System.currentTimeMillis();
+
+    // HUD 登録済みフラグ（HudRenderCallback 経由登録の有無）
+    private static volatile boolean registeredViaHudCallback = false;
 
     public static void onHoldChanged(boolean hold) {
         if (hold != lastHold) {
@@ -41,7 +48,7 @@ public final class HoldHudOverlay {
     }
 
     /**
-     * Fabric の HudRenderCallback に登録を試みる（失敗しても非致命）
+     * Fabric の HudRenderCallback に反射で登録（存在しない環境なら mixin で呼び出される想定）。
      */
     public static void register() {
         try {
@@ -61,13 +68,32 @@ public final class HoldHudOverlay {
                 return;
             }
 
-            final Class<?> listenerInterface = hudCallbackCls.isInterface() ? hudCallbackCls : hudCallbackCls;
+            final Class<?> listenerInterface = hudCallbackCls;
 
             InvocationHandler handler = (proxy, method, args) -> {
+                boolean debug = false;
+                try { debug = (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug); } catch (Throwable ignored) {}
+
+                if (debug) {
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("[OrePicker][HUD] handler invoked - method=").append(method.getName()).append(" args=");
+                    if (args == null) sb.append("null");
+                    else {
+                        sb.append("[");
+                        for (int i = 0; i < args.length; i++) {
+                            Object a = args[i];
+                            sb.append(i).append(":").append(a == null ? "null" : a.getClass().getSimpleName());
+                            if (i + 1 < args.length) sb.append(",");
+                        }
+                        sb.append("]");
+                    }
+                    System.out.println(sb.toString());
+                }
+
                 try {
                     try { if (ConfigManager.INSTANCE != null && !ConfigManager.INSTANCE.enableHudOverlay) return null; } catch (Throwable ignored) {}
 
-                    // try to update hold from Ore_pickerClient.localHold if present
+                    // Ore_pickerClient.localHold があれば反映
                     try {
                         Class<?> c = Class.forName("net.misemise.ore_picker.client.Ore_pickerClient");
                         Field f = c.getDeclaredField("localHold");
@@ -99,12 +125,14 @@ public final class HoldHudOverlay {
             try { registerMethod.setAccessible(true); } catch (Throwable ignored) {}
             try {
                 registerMethod.invoke(eventObj, listenerProxy);
+                registeredViaHudCallback = true;
                 System.out.println("[OrePicker] HUD overlay registered (via HudRenderCallback).");
             } catch (Throwable ite) {
                 System.err.println("[OrePicker] HudRenderCallback registration failed (non-fatal).");
+                try { if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) ite.printStackTrace(); } catch (Throwable ignored) {}
             }
         } catch (ClassNotFoundException cnf) {
-            System.out.println("[OrePicker] HudRenderCallback not present at runtime; rely on mixin.");
+            System.out.println("[OrePicker] HudRenderCallback not present at runtime; rely on mixin fallback.");
         } catch (Throwable t) {
             System.err.println("[OrePicker] register() unexpected error:");
             t.printStackTrace();
@@ -112,15 +140,29 @@ public final class HoldHudOverlay {
     }
 
     /**
-     * 描画入口。mixins の ChatHud.render の TAIL などから呼び出して下さい。
-     * matrixOrDrawContext は DrawContext / MatrixStack / null のいずれかを期待。
+     * 描画エントリ。mixin または HudRenderCallback から呼び出して下さい。
+     * matrixOrDrawContext は DrawContext / MatrixStack / null など。
      */
     public static void renderOnTop(MinecraftClient client, Object matrixOrDrawContext, float tickDelta) {
         try {
-            try { if (ConfigManager.INSTANCE != null && !ConfigManager.INSTANCE.enableHudOverlay) return; } catch (Throwable ignored) {}
+            boolean debug = false;
+            try { debug = (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug); } catch (Throwable ignored) {}
+
+            try { if (ConfigManager.INSTANCE != null && !ConfigManager.INSTANCE.enableHudOverlay) {
+                if (debug) System.out.println("[OrePicker][HUD] renderOnTop skipped: enableHudOverlay=false");
+                return;
+            } } catch (Throwable ignored) {}
 
             float opacity = computeOpacity();
-            if (opacity <= 0f) return;
+            if (opacity <= 0f) {
+                if (debug) System.out.println("[OrePicker][HUD] opacity <= 0, skip");
+                return;
+            }
+            if (opacity < MIN_VISIBLE_OPACITY) {
+                if (debug) System.out.println("[OrePicker][HUD] opacity " + opacity + " below MIN_VISIBLE_OPACITY, skip");
+                return;
+            }
+
             if (client == null) return;
 
             String textStr = "OrePicker: Running";
@@ -133,21 +175,27 @@ public final class HoldHudOverlay {
             int textWidth = tryGetTextWidth(client, textStr, ordered, labelText);
             int fontH = tryGetFontHeight(client);
 
+            // ここを調整してホットバーの上に出す
+            // 必要に応じて値を増やす／減らす（環境によっては UI スケールで差がでる）
+            float baseBottomOffset = 44f; // ホットバー + マージン相当。微調整してね。
+
             float xf = (sw / 2f) - (textWidth * SCALE / 2f);
-            float baseBottomOffset = 40f;
             float yf = (sh - baseBottomOffset - (fontH * SCALE));
 
-            // alpha as byte for tint int
             int alphaByte = Math.round(opacity * 255f);
-            if (opacity > 0f && alphaByte == 0) alphaByte = 1;
             alphaByte = alphaByte & 0xFF;
             int tint = (alphaByte << 24) | COLOR_RGB;
 
-            // try to ensure it renders above chat: disable depth and enable blending
+            if (debug) {
+                System.out.println("[OrePicker][HUD] renderOnTop: opacity=" + opacity + " alphaByte=" + alphaByte +
+                        " texW=" + textWidth + " sw=" + sw + " sh=" + sh + " xf=" + xf + " yf=" + yf +
+                        " ctx=" + (matrixOrDrawContext == null ? "null" : matrixOrDrawContext.getClass().getSimpleName()));
+            }
+
+            // depth を無効化して上に描く（多くのケースでチャットより上に出る）
             try { RenderSystem.disableDepthTest(); } catch (Throwable ignored) {}
             try { RenderSystem.enableBlend(); } catch (Throwable ignored) {}
 
-            // set shader color (some renderers multiply this)
             RenderSystem.setShaderColor(
                     ((COLOR_RGB >> 16) & 0xFF) / 255.0f,
                     ((COLOR_RGB >> 8) & 0xFF) / 255.0f,
@@ -156,20 +204,34 @@ public final class HoldHudOverlay {
             );
 
             boolean drawn = false;
-            // prefer to use incoming DrawContext/MatrixStack if available
+
+            // matrixStack 系
             if (matrixOrDrawContext != null && matrixOrDrawContext.getClass().getName().toLowerCase().contains("matrix")) {
                 drawn = tryDrawWithTextRendererUsingMatrix(client, matrixOrDrawContext, textStr, labelText, ordered, xf, yf, tint, SCALE);
-                if (!drawn) drawn = tryDrawWithTextRendererFallback(client, textStr, labelText, ordered, xf, yf, tint, SCALE);
-            } else {
-                if (matrixOrDrawContext != null) {
-                    drawn = tryDrawWithDrawContextReflection(matrixOrDrawContext, client, textStr, labelText, ordered, xf / SCALE, yf / SCALE, tint);
+                if (debug) System.out.println("[OrePicker][HUD] tryDrawWithTextRendererUsingMatrix -> " + drawn);
+                if (!drawn) {
+                    drawn = tryDrawWithTextRendererFallback(client, textStr, labelText, ordered, xf, yf, tint, SCALE);
+                    if (debug) System.out.println("[OrePicker][HUD] tryDrawWithTextRendererFallback -> " + drawn);
                 }
-                if (!drawn) drawn = tryDrawWithTextRendererFallback(client, textStr, labelText, ordered, xf, yf, tint, SCALE);
+            } else {
+                // DrawContext（あるいは DrawContext ライク）経路 — ここで座標は S CALE で割らない（重要）
+                if (matrixOrDrawContext != null) {
+                    drawn = tryDrawWithDrawContextReflection(matrixOrDrawContext, client, textStr, labelText, ordered, xf, yf, tint);
+                    if (debug) System.out.println("[OrePicker][HUD] tryDrawWithDrawContextReflection -> " + drawn);
+                }
+                if (!drawn) {
+                    drawn = tryDrawWithTextRendererFallback(client, textStr, labelText, ordered, xf, yf, tint, SCALE);
+                    if (debug) System.out.println("[OrePicker][HUD] tryDrawWithTextRendererFallback (2) -> " + drawn);
+                }
             }
 
             RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
             try { RenderSystem.enableDepthTest(); } catch (Throwable ignored) {}
             try { RenderSystem.disableBlend(); } catch (Throwable ignored) {}
+
+            if (debug && !drawn) {
+                System.out.println("[OrePicker][HUD] WARNING: no drawing method succeeded this frame.");
+            }
 
         } catch (Throwable t) {
             try { if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) t.printStackTrace(); } catch (Throwable ignored) {}
@@ -313,7 +375,6 @@ public final class HoldHudOverlay {
             }
 
             try { if (scaled && popM != null) popM.invoke(matrixStack); } catch (Throwable ignored) {}
-
         } catch (Throwable t) {
             try { if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) t.printStackTrace(); } catch (Throwable ignored) {}
         }
