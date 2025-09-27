@@ -4,7 +4,6 @@
   "package": "net.misemise.ore_picker.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
-    "net.misemise.ore_picker.client.mixin.InGameHudMixin"
   ],
   "injectors": {
     "defaultRequire": 1

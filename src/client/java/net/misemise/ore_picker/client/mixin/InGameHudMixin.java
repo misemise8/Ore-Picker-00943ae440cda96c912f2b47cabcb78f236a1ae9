@@ -1,24 +1,33 @@
 package net.misemise.ore_picker.client.mixin;
 
-import net.misemise.ore_picker.client.HoldHudOverlay;
+import net.fabricmc.api.Environment;
+import net.fabricmc.api.EnvType;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.render.RenderTickCounter;
+import net.minecraft.client.gui.hud.InGameHud;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * 直接クラスを参照して問題が出る場合は文字列ターゲットでも可。
- * 下は compile 時に InGameHud が見つからない場合に備え、文字列ターゲット版のテンプレ。
+ * Mixin: InGameHud.render の TAIL に差し込む（現在の mappings でのシグネチャに合わせる）
+ *  -> DrawContext, RenderTickCounter が渡される環境用
+ *
+ *  ここから HoldHudOverlay.renderOnTop(...) を呼び出す。
  */
-@Mixin(targets = {"net.minecraft.client.gui.hud.InGameHud"})
+@Environment(EnvType.CLIENT)
+@Mixin(InGameHud.class)
 public class InGameHudMixin {
     @Inject(method = "render", at = @At("TAIL"))
-    private void onRenderTail(MatrixStack matrices, float tickDelta, CallbackInfo ci) {
+    private void onRender(DrawContext drawContext, RenderTickCounter renderTickCounter, CallbackInfo ci) {
         try {
             MinecraftClient client = MinecraftClient.getInstance();
-            HoldHudOverlay.renderOnTop(client, matrices, tickDelta); // あなたの実装名に合わせて
+            if (client == null) return;
+
+            // HoldHudOverlay に DrawContext + RenderTickCounter 経路を追加してあるのでそれを呼ぶ
+            net.misemise.ore_picker.client.HoldHudOverlay.renderOnTop(client, drawContext, renderTickCounter);
         } catch (Throwable ignored) {}
     }
 }

@@ -1,9 +1,11 @@
 {
   "required": true,
   "minVersion": "0.8",
-  "package": "net.misemise.ore_picker.mixin.client",
+  "package": "net.misemise.ore_picker.client.mixin",
   "compatibilityLevel": "JAVA_21",
-  "client": [
+  "mixins": [
+    "ChatHudMixin",
+    "InGameHudMixin"
   ],
   "injectors": {
     "defaultRequire": 1
