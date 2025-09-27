@@ -67,8 +67,19 @@ public class Ore_picker implements ModInitializer {
 
                 // update on server thread and notify
                 context.server().execute(() -> {
-                    player.sendMessage(Text.of("[OrePicker] auto-collect: " + (hold ? "ON" : "OFF")), false);
-                    System.out.println("[OrePicker] Received hold state from " + player.getGameProfile().getName() + ": " + hold);
+                    try {
+                        // チャットでの表示は debug フラグが true のときだけ
+                        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                            try {
+                                player.sendMessage(Text.of("[OrePicker] auto-collect: " + (hold ? "ON" : "OFF")), false);
+                            } catch (Throwable ignored) {}
+                        }
+                    } catch (Throwable ignored) {}
+
+                    // 常にコンソールには出す（デバッグの有無に関係なくログを見たい場合）
+                    try {
+                        System.out.println("[OrePicker] Received hold state from " + player.getGameProfile().getName() + ": " + hold);
+                    } catch (Throwable ignored) {}
                 });
             });
             System.out.println("[OrePicker] Registered payload receiver.");
