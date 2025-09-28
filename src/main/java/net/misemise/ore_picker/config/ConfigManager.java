@@ -56,7 +56,12 @@ public final class ConfigManager {
     // 一括破壊時にチャットへログを出すか（default false）
     public boolean logToChat = false;
 
+    // HUD に VeinCount を表示するか
     public boolean hudShowVeinCount = true;
+    // HUD フォントスケール（倍率、既定 1.2）
+    public double hudFontScale = 1.2d;
+    // HUD のホットバーからの下方向オフセット（ピクセル相当。既定 44）
+    public double hudBottomOffset = 44.0d;
 
     private ConfigManager() {
         configDirPath = Paths.get(CONFIG_DIR);
@@ -119,6 +124,11 @@ public final class ConfigManager {
         this.enableHudOverlay = parseBoolean(p.getProperty("enableHudOverlay"), this.enableHudOverlay);
         this.logToChat = parseBoolean(p.getProperty("logToChat"), this.logToChat);
 
+        // HUD 関連
+        this.hudShowVeinCount = parseBoolean(p.getProperty("hudShowVeinCount"), this.hudShowVeinCount);
+        this.hudFontScale = parseDouble(p.getProperty("hudFontScale"), this.hudFontScale);
+        this.hudBottomOffset = parseDouble(p.getProperty("hudBottomOffset"), this.hudBottomOffset);
+
         System.out.println("[OrePicker] ConfigManager: reloaded config (maxVeinSize=" + this.maxVeinSize
                 + ", maxVeinSizeCap=" + this.maxVeinSizeCap
                 + ", autoCollectEnabled=" + this.autoCollectEnabled
@@ -129,6 +139,9 @@ public final class ConfigManager {
                 + ", applyInCreative=" + this.applyInCreative
                 + ", enableHudOverlay=" + this.enableHudOverlay
                 + ", logToChat=" + this.logToChat
+                + ", hudShowVeinCount=" + this.hudShowVeinCount
+                + ", hudFontScale=" + this.hudFontScale
+                + ", hudBottomOffset=" + this.hudBottomOffset
                 + ")");
 
         for (Runnable r : listeners) {
@@ -154,6 +167,11 @@ public final class ConfigManager {
         p.setProperty("applyInCreative", Boolean.toString(this.applyInCreative));
         p.setProperty("enableHudOverlay", Boolean.toString(this.enableHudOverlay));
         p.setProperty("logToChat", Boolean.toString(this.logToChat));
+
+        // HUD 関連
+        p.setProperty("hudShowVeinCount", Boolean.toString(this.hudShowVeinCount));
+        p.setProperty("hudFontScale", Double.toString(this.hudFontScale));
+        p.setProperty("hudBottomOffset", Double.toString(this.hudBottomOffset));
 
         try (BufferedWriter writer = Files.newBufferedWriter(configFilePath, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
             p.store(writer, "OrePicker configuration");
