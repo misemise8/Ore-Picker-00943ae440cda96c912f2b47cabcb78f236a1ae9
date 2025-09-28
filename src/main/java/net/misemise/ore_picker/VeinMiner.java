@@ -11,18 +11,22 @@ import net.minecraft.block.Blocks;
 import net.minecraft.text.Text;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.Constructor;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 import net.minecraft.util.math.BlockPos;
+
 /**
  * VeinMiner:
  * - BFS で同種ブロックを探索し、limit を超えたら探索を停止する。
  * - 各ブロック破壊時に toolStack を利用して drop を生成する（可能な場合は Block.dropStacks を呼ぶ）。
+ *
+ * 修正:
+ * - チャット通知はここでは行わず、VeinMineTracker 側で一元的に行う想定に変更。
  */
 public final class VeinMiner {
     private VeinMiner() {}
@@ -31,6 +35,8 @@ public final class VeinMiner {
      * mineAndSchedule:
      *  - limit: 開始ブロックを含む合計上限
      *  - toolStack: スケジュール時にキャプチャしたツール（null 可）
+     *
+     * 返り値: broken count (※この実装では開始ブロックを除く隣接で破壊した数を返します)
      */
     public static int mineAndSchedule(ServerWorld world, ServerPlayerEntity player, BlockPos startPos, BlockState originalState, UUID playerUuid, int limit, ItemStack toolStack) {
         if (world == null || player == null || originalState == null) return 0;
@@ -40,10 +46,10 @@ public final class VeinMiner {
         int neighborLimit = Math.max(0, limit - 1);
 
         Deque<BlockPos> q = new ArrayDeque<>();
-        Set<BlockPos> visited = new HashSet<>();
+        HashSet<BlockPos> visited = new HashSet<>();
         List<BlockPos> toBreak = new ArrayList<>();
 
-        // 6-direction neighbors (you can expand to 26 if desired)
+        // 6-direction neighbors
         final int[][] DIRS = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
         for (int[] d : DIRS) {
             BlockPos n = startPos.add(d[0], d[1], d[2]);
@@ -199,18 +205,13 @@ public final class VeinMiner {
         if (broken > 0) {
             try {
                 String blockId = originalState.getBlock().toString();
-                // チャットに出すかどうかは設定次第
-                try {
-                    if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.logToChat) {
-                        // 翻訳キーを使って表示（lang ファイルで整える）
-                        player.sendMessage(Text.translatable("chat.ore_picker.vein_broken", broken, Text.literal(blockId)), false);
-                    }
-                } catch (Throwable ignored) {}
-
-                // サーバー側ログ（コンソール）には常に出す
+                // -----------------------
+                // ここではチャット通知は行わない（通知は VeinMineTracker 側で一元化）
+                // コンソールログのみ出す
                 try {
                     System.out.println("[VeinMiner] Vein broken: " + broken + " " + blockId);
                 } catch (Throwable ignored) {}
+                // -----------------------
             } catch (Throwable ignored) {}
         }
 
