@@ -15,7 +15,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.item.ItemStack; // ← 追加
+import net.minecraft.item.ItemStack;
 
 import net.misemise.ore_picker.config.ConfigManager;
 
@@ -24,9 +24,21 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Server-side initializer (logging-enabled).
+ * Server-side initializer for OrePicker.
+ *
+ * Responsibilities:
+ *  - load config
+ *  - register packet codec (HoldC2SPayload)
+ *  - register receiver which updates server-side hold state (and prints debug chat when debug=true)
+ *  - hook PlayerBlockBreakEvents.AFTER to schedule auto-collect/vein tasks on server
+ *  - register ServerTick event to flush scheduled collects and handle VeinMineTracker timeouts
+ *
+ * NOTE:
+ *  - Client-side HUD / outline rendering should be implemented in the client initializer (Ore_pickerClient).
+ *  - We keep a simple Map<UUID,Boolean> playerHoldState to reflect the latest hold state reported by each client.
  */
 public class Ore_picker implements ModInitializer {
+    /** player UUID -> current hold state (client-reported) */
     public static final Map<UUID, Boolean> playerHoldState = new ConcurrentHashMap<>();
 
     @Override
@@ -50,13 +62,14 @@ public class Ore_picker implements ModInitializer {
             t.printStackTrace();
         }
 
-        // register receiver
+        // register receiver for HoldC2SPayload
         try {
             ServerPlayNetworking.registerGlobalReceiver(HoldC2SPayload.TYPE, (payload, context) -> {
                 boolean hold;
                 try {
                     hold = payload.pressed();
                 } catch (Throwable t) {
+                    // malformed payload — ignore
                     return;
                 }
 
@@ -65,20 +78,20 @@ public class Ore_picker implements ModInitializer {
                 UUID uuid = player.getUuid();
                 playerHoldState.put(uuid, hold);
 
-                // update on server thread and notify
+                // update and notify on server thread
                 context.server().execute(() -> {
                     try {
-                        // チャットでの表示は debug フラグが true のときだけ
+                        // チャットでの表示は debug フラグが true のときだけ表示するように変更済み
                         if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
                             try {
-                                player.sendMessage(Text.of("[OrePicker] auto-collect: " + (hold ? "ON" : "OFF")), false);
+                                player.sendMessage(Text.literal("[OrePicker] auto-collect: " + (hold ? "ON" : "OFF")), false);
                             } catch (Throwable ignored) {}
                         }
                     } catch (Throwable ignored) {}
 
-                    // 常にコンソールには出す（デバッグの有無に関係なくログを見たい場合）
+                    // 常にコンソールには出す（ログ確認用）
                     try {
-                        System.out.println("[OrePicker] Received hold state from " + player.getGameProfile().getName() + ": " + hold);
+                        System.out.println("[OrePicker] Received hold state from " + safeGetPlayerName(player) + ": " + hold);
                     } catch (Throwable ignored) {}
                 });
             });
@@ -91,7 +104,7 @@ public class Ore_picker implements ModInitializer {
         // register block-break AFTER -> schedule next-tick collection
         PlayerBlockBreakEvents.AFTER.register((World world, PlayerEntity player, BlockPos pos, BlockState state, BlockEntity blockEntity) -> {
             try {
-                // we only schedule on server thread
+                // only schedule on server world and for server players
                 if (!(world instanceof net.minecraft.server.world.ServerWorld serverWorld)) {
                     return;
                 }
@@ -120,14 +133,14 @@ public class Ore_picker implements ModInitializer {
             }
         });
 
-        // register server tick to flush scheduled collects
+        // register server tick to flush scheduled collects and handle VeinMineTracker timeouts
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             try {
                 CollectScheduler.tick(server);
             } catch (Throwable t) {
                 t.printStackTrace();
             }
-            // keep any other server-tick tasks here (VeinMineTracker timeouts etc)
+            // VeinMineTracker timeouts (finalize notifications)
             try {
                 VeinMineTracker.handleTimeouts(uuid -> {
                     for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
@@ -139,5 +152,24 @@ public class Ore_picker implements ModInitializer {
         });
 
         System.out.println("[OrePicker] server initialization complete");
+    }
+
+    // -------------------- helpers --------------------
+
+    /**
+     * 安全にプレイヤー名を取得する（例外に強い）。
+     */
+    private static String safeGetPlayerName(ServerPlayerEntity player) {
+        if (player == null) return "unknown";
+        try {
+            return player.getName().getString();
+        } catch (Throwable t) {
+            try {
+                if (player.getGameProfile() != null && player.getGameProfile().getName() != null) {
+                    return player.getGameProfile().getName();
+                }
+            } catch (Throwable ignored) {}
+        }
+        return "unknown";
     }
 }

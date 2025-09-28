@@ -56,6 +56,8 @@ public final class ConfigManager {
     // 一括破壊時にチャットへログを出すか（default false）
     public boolean logToChat = false;
 
+    public boolean hudShowVeinCount = true;
+
     private ConfigManager() {
         configDirPath = Paths.get(CONFIG_DIR);
         configFilePath = configDirPath.resolve(CONFIG_NAME);
