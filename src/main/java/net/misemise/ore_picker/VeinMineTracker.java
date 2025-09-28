@@ -7,6 +7,7 @@ import java.util.function.Function;
 
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
+import net.misemise.ore_picker.config.ConfigManager;
 
 /**
  * VeinMineTracker
@@ -14,9 +15,8 @@ import net.minecraft.text.Text;
  * - 一定時間（INACTIVITY_TIMEOUT_MS）破壊イベントが来なければ「終了」とみなして通知する
  * - startTracking/stopAndNotify を提供（将来の明示的 start/stop 用）
  *
- * 注意:
- * - このクラスはスレッドセーフ（ConcurrentHashMap を使用）
- * - プレイヤーがログアウトしている場合は通知をスキップ
+ * 修正:
+ * - チャット送信は ConfigManager.INSTANCE.logToChat または ConfigManager.INSTANCE.debug が true のときのみ行う
  */
 public final class VeinMineTracker {
     private VeinMineTracker() {}
@@ -53,8 +53,24 @@ public final class VeinMineTracker {
         LAST_ACTION_MS.remove(uuid);
         if (cnt == null) cnt = 0;
         if (id == null) id = "unknown";
+
+        // チャット出力は設定依存にする
+        boolean allowChat = false;
         try {
-            player.sendMessage(Text.literal("Broke " + cnt + " " + id), false);
+            if (ConfigManager.INSTANCE != null) {
+                allowChat = ConfigManager.INSTANCE.logToChat || ConfigManager.INSTANCE.debug;
+            }
+        } catch (Throwable ignored) {}
+
+        try {
+            if (allowChat) {
+                player.sendMessage(Text.literal("Broke " + cnt + " " + id), false);
+            }
+        } catch (Throwable ignored) {}
+
+        // コンソールには常に出す（サーバーログ）
+        try {
+            System.out.println("[VeinMineTracker] Finalized for " + uuid + " -> Broke " + cnt + " " + id);
         } catch (Throwable ignored) {}
     }
 
@@ -80,8 +96,23 @@ public final class VeinMineTracker {
 
                 ServerPlayerEntity player = playerLookup.apply(uuid);
                 if (player != null) {
+                    // チャット出力は設定依存にする
+                    boolean allowChat = false;
                     try {
-                        player.sendMessage(Text.literal("Broke " + cnt + " " + id), false);
+                        if (ConfigManager.INSTANCE != null) {
+                            allowChat = ConfigManager.INSTANCE.logToChat || ConfigManager.INSTANCE.debug;
+                        }
+                    } catch (Throwable ignored) {}
+
+                    try {
+                        if (allowChat) {
+                            player.sendMessage(Text.literal("Broke " + cnt + " " + id), false);
+                        }
+                    } catch (Throwable ignored) {}
+
+                    // コンソールには常に出す（デバッグ用）
+                    try {
+                        System.out.println("[VeinMineTracker] Timeout finalize for " + uuid + ": Broke " + cnt + " " + id);
                     } catch (Throwable ignored) {}
                 }
             }
