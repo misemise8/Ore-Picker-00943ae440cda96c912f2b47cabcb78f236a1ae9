@@ -3,7 +3,6 @@ package net.misemise.ore_picker;
 import net.misemise.ore_picker.config.ConfigManager;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.Identifier;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Block;
 import net.minecraft.item.ItemStack;
@@ -25,8 +24,9 @@ import net.minecraft.util.math.BlockPos;
  * - BFS で同種ブロックを探索し、limit を超えたら探索を停止する。
  * - 各ブロック破壊時に toolStack を利用して drop を生成する（可能な場合は Block.dropStacks を呼ぶ）。
  *
- * 修正:
- * - チャット通知はここでは行わず、VeinMineTracker 側で一元的に行う想定に変更。
+ * 変更:
+ * - メッセージ表示は「開始ブロックを含めた合計」で出す（ユーザにはこちらが自然）。
+ * - mineAndSchedule の戻り値も「開始ブロックを含めた合計」を返すようにした。
  */
 public final class VeinMiner {
     private VeinMiner() {}
@@ -36,20 +36,21 @@ public final class VeinMiner {
      *  - limit: 開始ブロックを含む合計上限
      *  - toolStack: スケジュール時にキャプチャしたツール（null 可）
      *
-     * 返り値: broken count (※この実装では開始ブロックを除く隣接で破壊した数を返します)
+     * 返り値: totalBroken = 1 (開始ブロック) + 隣接で破壊した数
      */
     public static int mineAndSchedule(ServerWorld world, ServerPlayerEntity player, BlockPos startPos, BlockState originalState, UUID playerUuid, int limit, ItemStack toolStack) {
         if (world == null || player == null || originalState == null) return 0;
         Block target = originalState.getBlock();
         if (target == null) return 0;
 
+        // neighborLimit は「開始ブロックを除いた」上限
         int neighborLimit = Math.max(0, limit - 1);
 
         Deque<BlockPos> q = new ArrayDeque<>();
         HashSet<BlockPos> visited = new HashSet<>();
         List<BlockPos> toBreak = new ArrayList<>();
 
-        // 6-direction neighbors
+        // 6方向探索
         final int[][] DIRS = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
         for (int[] d : DIRS) {
             BlockPos n = startPos.add(d[0], d[1], d[2]);
@@ -79,7 +80,7 @@ public final class VeinMiner {
             }
         }
 
-        int broken = 0;
+        int neighborBroken = 0;
         for (BlockPos p : toBreak) {
             try {
                 BlockState currentState = world.getBlockState(p);
@@ -196,25 +197,39 @@ public final class VeinMiner {
                     CollectScheduler.schedule(world, p, playerUuid, originalState, false, toolStack);
                 } catch (Throwable ignored) {}
 
-                broken++;
+                neighborBroken++;
             } catch (Throwable t) {
                 t.printStackTrace();
             }
         }
 
-        if (broken > 0) {
+        // totalBroken は 「開始ブロック(1) + 隣接で壊した数」
+        int totalBroken = 1 + neighborBroken;
+
+        if (neighborBroken > 0 || totalBroken > 0) {
             try {
                 String blockId = originalState.getBlock().toString();
-                // -----------------------
-                // ここではチャット通知は行わない（通知は VeinMineTracker 側で一元化）
-                // コンソールログのみ出す
+
+                // 即時チャット送信（設定で有効な場合のみ）
                 try {
-                    System.out.println("[VeinMiner] Vein broken: " + broken + " " + blockId);
+                    if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.logToChat) {
+                        try {
+                            player.sendMessage(Text.translatable("chat.ore_picker.vein_broken", totalBroken, Text.literal(blockId)), false);
+                        } catch (Throwable t) {
+                            // フォールバック
+                            player.sendMessage(Text.literal("[OrePicker] Broke " + totalBroken + " " + blockId), false);
+                        }
+                    }
                 } catch (Throwable ignored) {}
-                // -----------------------
+
+                // コンソールログは常に出す
+                try {
+                    System.out.println("[VeinMiner] Vein broken: " + totalBroken + " " + blockId);
+                } catch (Throwable ignored) {}
             } catch (Throwable ignored) {}
         }
 
-        return broken;
+        // 戻り値も合計に揃える（呼び出し側ログとの不一致を避ける）
+        return totalBroken;
     }
 }

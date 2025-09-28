@@ -7,16 +7,15 @@ import java.util.function.Function;
 
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
-import net.misemise.ore_picker.config.ConfigManager;
 
 /**
  * VeinMineTracker
  * - AutoCollectHandler.increment(...) を呼ぶことでカウントする（壊したごとにインクリメント）
  * - 一定時間（INACTIVITY_TIMEOUT_MS）破壊イベントが来なければ「終了」とみなして通知する
- * - startTracking/stopAndNotify を提供（将来の明示的 start/stop 用）
  *
- * 修正:
- * - チャット送信は ConfigManager.INSTANCE.logToChat または ConfigManager.INSTANCE.debug が true のときのみ行う
+ * 変更:
+ * - チャット送信はここでは行わない（VeinMiner が即時チャットを行うため）。
+ * - タイムアウト時の通知はコンソール出力のみ行う（必要なら NotificationHelper.logToConsole を使う）。
  */
 public final class VeinMineTracker {
     private VeinMineTracker() {}
@@ -54,23 +53,10 @@ public final class VeinMineTracker {
         if (cnt == null) cnt = 0;
         if (id == null) id = "unknown";
 
-        // チャット出力は設定依存にする
-        boolean allowChat = false;
+        // チャットはここでは行わない（VeinMiner が既に即時チャットしている）
         try {
-            if (ConfigManager.INSTANCE != null) {
-                allowChat = ConfigManager.INSTANCE.logToChat || ConfigManager.INSTANCE.debug;
-            }
-        } catch (Throwable ignored) {}
-
-        try {
-            if (allowChat) {
-                player.sendMessage(Text.literal("Broke " + cnt + " " + id), false);
-            }
-        } catch (Throwable ignored) {}
-
-        // コンソールには常に出す（サーバーログ）
-        try {
-            System.out.println("[VeinMineTracker] Finalized for " + uuid + " -> Broke " + cnt + " " + id);
+            // コンソールログのみ（必要なら NotificationHelper.logToConsole を呼ぶ）
+            NotificationHelper.logToConsole(player, Text.literal("Broke " + cnt + " " + id));
         } catch (Throwable ignored) {}
     }
 
@@ -81,13 +67,11 @@ public final class VeinMineTracker {
      */
     public static void handleTimeouts(Function<UUID, ServerPlayerEntity> playerLookup) {
         long now = System.currentTimeMillis();
-        // 固有のキー配列を作る（ConcurrentHashMap を回しているため CME を避ける）
         UUID[] keys = LAST_ACTION_MS.keySet().toArray(new UUID[0]);
         for (UUID uuid : keys) {
             Long last = LAST_ACTION_MS.get(uuid);
             if (last == null) continue;
             if (now - last >= INACTIVITY_TIMEOUT_MS) {
-                // finalize
                 Integer cnt = COUNTS.remove(uuid);
                 String id = FIRST_ID.remove(uuid);
                 LAST_ACTION_MS.remove(uuid);
@@ -96,21 +80,11 @@ public final class VeinMineTracker {
 
                 ServerPlayerEntity player = playerLookup.apply(uuid);
                 if (player != null) {
-                    // チャット出力は設定依存にする
-                    boolean allowChat = false;
                     try {
-                        if (ConfigManager.INSTANCE != null) {
-                            allowChat = ConfigManager.INSTANCE.logToChat || ConfigManager.INSTANCE.debug;
-                        }
+                        // 即時チャットは VeinMiner が行うためここではチャットしない
+                        NotificationHelper.logToConsole(player, Text.literal("Broke " + cnt + " " + id));
                     } catch (Throwable ignored) {}
-
-                    try {
-                        if (allowChat) {
-                            player.sendMessage(Text.literal("Broke " + cnt + " " + id), false);
-                        }
-                    } catch (Throwable ignored) {}
-
-                    // コンソールには常に出す（デバッグ用）
+                } else {
                     try {
                         System.out.println("[VeinMineTracker] Timeout finalize for " + uuid + ": Broke " + cnt + " " + id);
                     } catch (Throwable ignored) {}
