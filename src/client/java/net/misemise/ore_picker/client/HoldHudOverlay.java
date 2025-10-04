@@ -9,43 +9,44 @@ import net.misemise.ore_picker.config.ConfigManager;
 import java.lang.reflect.*;
 
 /**
- * HoldHudOverlay - HUD 表示（完全版）
- *
- * - ConfigManager から hudFontScale / hudBottomOffset を読み取る
- * - ホールド中は不透明、離すとフェードアウト（FADE_MS）
- * - 受信した一括破壊カウントを短時間 HUD に表示するための onVeinCountReceived(int)
- * - DrawContext / MatrixStack / DrawContext-like を反射で探して描画（互換性重視）
- *
- * 注:
- * - クライアント側のパケット受信はこのクラス内で反射登録はしていません（確実に動くように
- *   Ore_pickerClient 側で ClientPlayNetworking.registerGlobalReceiver を行って、
- *   受信したら HoldHudOverlay.onVeinCountReceived(count) を呼ぶ形にしてください）。
+ * HoldHudOverlay - 位置修正版 + 重複描画抑制 + ログ抑制 + VeinCount受信表示
  */
 public final class HoldHudOverlay {
     private HoldHudOverlay() {}
 
-    private static final long FADE_MS = 1200L; // 1.2 秒（ホールド解除後のフェード時間）
+    private static final long FADE_MS = 1200L; // 1.2 秒
+    private static final float DEFAULT_SCALE = 1.2f;
     private static final int COLOR_RGB = 0x9AFF66; // RRGGBB
 
     // 最小可視アルファ（小さすぎると 1 バイト丸めでちらつく）
     private static final float MIN_VISIBLE_OPACITY = 0.03f;
 
-    // 表示する一括破壊カウントの持続時間（ms）
-    private static final long VEIN_COUNT_SHOW_MS = 2000L;
-
     // hold state
     private static volatile boolean lastHold = false;
     private static volatile long lastChangeTime = System.currentTimeMillis();
 
-    // vein count 表示用
-    private static volatile int lastVeinCount = 0;
-    private static volatile long lastVeinCountTime = 0L;
+    // HUD 登録済みフラグ（HudRenderCallback 経由登録の有無）
+    private static volatile boolean registeredViaHudCallback = false;
 
+    // Vein count info (set by Ore_pickerClient's receiver via onVeinCountReceived)
+    private static volatile int veinCount = 0;
+    private static volatile long veinCountTimeMs = 0L;
+
+    // 外部から hold 変化があれば通知
     public static void onHoldChanged(boolean hold) {
         if (hold != lastHold) {
             lastHold = hold;
             lastChangeTime = System.currentTimeMillis();
         }
+    }
+
+    /**
+     * サーバーから vein_count を受信した時に呼ばれる（Ore_pickerClient から呼び出される）。
+     * HUD 表示用に保存しておく。
+     */
+    public static void onVeinCountReceived(int count) {
+        veinCount = count;
+        veinCountTimeMs = System.currentTimeMillis();
     }
 
     private static float computeOpacity() {
@@ -56,18 +57,7 @@ public final class HoldHudOverlay {
     }
 
     /**
-     * サーバーから来る S2C を受けたときに呼ぶ。
-     * - count を HUD に短時間表示する（自動で消える）
-     * - クライアントスレッドで呼ばれる前提だが、安全のためどこからでも呼べるようにしてある
-     */
-    public static void onVeinCountReceived(int count) {
-        lastVeinCount = count;
-        lastVeinCountTime = System.currentTimeMillis();
-    }
-
-    /**
      * Fabric の HudRenderCallback に反射で登録（存在しない環境なら mixin で呼び出される想定）。
-     * Ore_pickerClient のクライアント初期化時に呼んでください。
      */
     public static void register() {
         try {
@@ -93,10 +83,26 @@ public final class HoldHudOverlay {
                 boolean debug = false;
                 try { debug = (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug); } catch (Throwable ignored) {}
 
+                if (debug) {
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("[OrePicker][HUD] handler invoked - method=").append(method.getName()).append(" args=");
+                    if (args == null) sb.append("null");
+                    else {
+                        sb.append("[");
+                        for (int i = 0; i < args.length; i++) {
+                            Object a = args[i];
+                            sb.append(i).append(":").append(a == null ? "null" : a.getClass().getSimpleName());
+                            if (i + 1 < args.length) sb.append(",");
+                        }
+                        sb.append("]");
+                    }
+                    System.out.println(sb.toString());
+                }
+
                 try {
                     try { if (ConfigManager.INSTANCE != null && !ConfigManager.INSTANCE.enableHudOverlay) return null; } catch (Throwable ignored) {}
 
-                    // Ore_pickerClient.localHold があれば反映（あれば最新の hold を取得）
+                    // Ore_pickerClient.localHold があれば反映
                     try {
                         Class<?> c = Class.forName("net.misemise.ore_picker.client.Ore_pickerClient");
                         Field f = c.getDeclaredField("localHold");
@@ -128,6 +134,7 @@ public final class HoldHudOverlay {
             try { registerMethod.setAccessible(true); } catch (Throwable ignored) {}
             try {
                 registerMethod.invoke(eventObj, listenerProxy);
+                registeredViaHudCallback = true;
                 System.out.println("[OrePicker] HUD overlay registered (via HudRenderCallback).");
             } catch (Throwable ite) {
                 System.err.println("[OrePicker] HudRenderCallback registration failed (non-fatal).");
@@ -156,8 +163,10 @@ public final class HoldHudOverlay {
             } } catch (Throwable ignored) {}
 
             float opacity = computeOpacity();
+
+            // 不要ログ抑制: opacity <= 0 のログは最小限に
             if (opacity <= 0f) {
-                if (debug) System.out.println("[OrePicker][HUD] opacity <= 0, skip");
+                if (debug && lastHold) System.out.println("[OrePicker][HUD] opacity <= 0, skip");
                 return;
             }
             if (opacity < MIN_VISIBLE_OPACITY) {
@@ -167,7 +176,24 @@ public final class HoldHudOverlay {
 
             if (client == null) return;
 
+            // HudRenderCallback 経路で登録済みなら、matrixOrDrawContext が null の二度目呼び出しを無視
+            if (matrixOrDrawContext == null && registeredViaHudCallback) {
+                if (debug) System.out.println("[OrePicker][HUD] skipping null ctx callback because registeredViaHudCallback=true");
+                return;
+            }
+
+            // 基本テキスト（VeinCount が有効なら追加）
             String textStr = "OrePicker: Running";
+            try {
+                if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.hudShowVeinCount) {
+                    // show vein count only if recently received (e.g. within 5 seconds)
+                    long now = System.currentTimeMillis();
+                    if (veinCountTimeMs > 0 && now - veinCountTimeMs < 5000L) {
+                        textStr = textStr + " (" + veinCount + ")";
+                    }
+                }
+            } catch (Throwable ignored) {}
+
             Text labelText = Text.literal(textStr);
             OrderedText ordered = labelText.asOrderedText();
 
@@ -177,21 +203,21 @@ public final class HoldHudOverlay {
             int textWidth = tryGetTextWidth(client, textStr, ordered, labelText);
             int fontH = tryGetFontHeight(client);
 
-            // Config からスケール・オフセットを取得（fallback あり）
-            float scale = 1.2f;
-            float bottomOffset = 44f;
+            // HUD の位置とスケールは設定から取れるようにした
+            float baseBottomOffset = 44f;
+            float scale = DEFAULT_SCALE;
             try {
                 if (ConfigManager.INSTANCE != null) {
+                    baseBottomOffset = (float) ConfigManager.INSTANCE.hudBottomOffset;
                     scale = (float) ConfigManager.INSTANCE.hudFontScale;
-                    bottomOffset = (float) ConfigManager.INSTANCE.hudBottomOffset;
+                    if (scale <= 0.01f) scale = DEFAULT_SCALE;
                 }
             } catch (Throwable ignored) {}
 
             float xf = (sw / 2f) - (textWidth * scale / 2f);
-            float yf = (sh - bottomOffset - (fontH * scale));
+            float yf = (sh - baseBottomOffset - (fontH * scale));
 
-            int alphaByte = Math.round(opacity * 255f);
-            alphaByte = alphaByte & 0xFF;
+            int alphaByte = Math.round(opacity * 255f) & 0xFF;
             int tint = (alphaByte << 24) | COLOR_RGB;
 
             if (debug) {
@@ -200,7 +226,7 @@ public final class HoldHudOverlay {
                         " ctx=" + (matrixOrDrawContext == null ? "null" : matrixOrDrawContext.getClass().getSimpleName()));
             }
 
-            // depth を無効化して上に描く（多くのケースでチャットより上に出る）
+            // depth を無効化して上に描く
             try { RenderSystem.disableDepthTest(); } catch (Throwable ignored) {}
             try { RenderSystem.enableBlend(); } catch (Throwable ignored) {}
 
@@ -222,7 +248,7 @@ public final class HoldHudOverlay {
                     if (debug) System.out.println("[OrePicker][HUD] tryDrawWithTextRendererFallback -> " + drawn);
                 }
             } else {
-                // DrawContext（あるいは DrawContext ライク）経路
+                // DrawContext 経路
                 if (matrixOrDrawContext != null) {
                     drawn = tryDrawWithDrawContextReflection(matrixOrDrawContext, client, textStr, labelText, ordered, xf, yf, tint);
                     if (debug) System.out.println("[OrePicker][HUD] tryDrawWithDrawContextReflection -> " + drawn);
@@ -232,33 +258,6 @@ public final class HoldHudOverlay {
                     if (debug) System.out.println("[OrePicker][HUD] tryDrawWithTextRendererFallback (2) -> " + drawn);
                 }
             }
-
-            // 追加表示: 一括破壊カウントがあれば（設定で HUD 表示許可なら）右側に表示
-            try {
-                if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.hudShowVeinCount) {
-                    long now = System.currentTimeMillis();
-                    if (lastVeinCountTime > 0 && now - lastVeinCountTime <= VEIN_COUNT_SHOW_MS) {
-                        String cntStr = "Vein: " + lastVeinCount;
-                        Text cntText = Text.literal(cntStr);
-                        OrderedText cntOrdered = cntText.asOrderedText();
-                        int cntW = tryGetTextWidth(client, cntStr, cntOrdered, cntText);
-                        float cntX = xf + (textWidth * scale / 2f) + 8f; // main text の右にちょっと置く
-                        float cntY = yf;
-                        // 色は白ベースで opacity を乗せる
-                        int cntTint = (alphaByte << 24) | 0xFFFFFF;
-                        boolean cntDrawn = false;
-                        if (matrixOrDrawContext != null && matrixOrDrawContext.getClass().getName().toLowerCase().contains("matrix")) {
-                            cntDrawn = tryDrawWithTextRendererUsingMatrix(client, matrixOrDrawContext, cntStr, cntText, cntOrdered, cntX, cntY, cntTint, scale);
-                        } else {
-                            cntDrawn = tryDrawWithTextRendererFallback(client, cntStr, cntText, cntOrdered, cntX, cntY, cntTint, scale);
-                            if (!cntDrawn && matrixOrDrawContext != null) {
-                                cntDrawn = tryDrawWithDrawContextReflection(matrixOrDrawContext, client, cntStr, cntText, cntOrdered, cntX, cntY, cntTint);
-                            }
-                        }
-                        if (debug) System.out.println("[OrePicker][HUD] veinCount drawn=" + cntDrawn + " cnt=" + lastVeinCount);
-                    }
-                }
-            } catch (Throwable ignored) {}
 
             RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
             try { RenderSystem.enableDepthTest(); } catch (Throwable ignored) {}
@@ -441,6 +440,7 @@ public final class HoldHudOverlay {
                         }
                     }
                     if (pts.length == 4 && pts[0] == String.class) {
+                        // older signature: (String, float, float, int)
                         m.invoke(tr, str, xf, yf, tint);
                         return true;
                     }

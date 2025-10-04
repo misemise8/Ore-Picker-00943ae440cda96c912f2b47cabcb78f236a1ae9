@@ -56,6 +56,12 @@ public final class ConfigManager {
     // 一括破壊時にチャットへログを出すか（default false）
     public boolean logToChat = false;
 
+    // Outline overlay control (client-side visual aid)
+    // デフォルトは false にして配布時の影響を最小化
+    public boolean enableOutlineOverlay = false;
+    // 探索半径（ブロック単位）。クライアント側で制限して使用する想定。
+    public int outlineRadius = 16;
+
     // HUD に VeinCount を表示するか
     public boolean hudShowVeinCount = true;
     // HUD フォントスケール（倍率、既定 1.2）
@@ -107,6 +113,10 @@ public final class ConfigManager {
             System.err.println("[OrePicker] ConfigManager: failed to read config: " + ioe.getMessage());
             return;
         }
+
+        this.enableOutlineOverlay = parseBoolean(p.getProperty("enableOutlineOverlay"), this.enableOutlineOverlay);
+        this.outlineRadius = parseInt(p.getProperty("outlineRadius"), this.outlineRadius);
+
 
         this.maxVeinSize = parseInt(p.getProperty("maxVeinSize"), this.maxVeinSize);
         this.maxVeinSizeCap = parseInt(p.getProperty("maxVeinSizeCap"), this.maxVeinSizeCap);
@@ -167,6 +177,11 @@ public final class ConfigManager {
         p.setProperty("applyInCreative", Boolean.toString(this.applyInCreative));
         p.setProperty("enableHudOverlay", Boolean.toString(this.enableHudOverlay));
         p.setProperty("logToChat", Boolean.toString(this.logToChat));
+
+
+        p.setProperty("enableOutlineOverlay", Boolean.toString(this.enableOutlineOverlay));
+        p.setProperty("outlineRadius", Integer.toString(this.outlineRadius));
+
 
         // HUD 関連
         p.setProperty("hudShowVeinCount", Boolean.toString(this.hudShowVeinCount));
