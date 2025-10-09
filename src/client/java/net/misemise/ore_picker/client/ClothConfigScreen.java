@@ -225,6 +225,27 @@ public class ClothConfigScreen {
                     .setDefaultValue(false)
                     .build());
 
+
+            // --- Outline overlay enable ---
+            general.addEntry(entryBuilder
+                    .startBooleanToggle(tr(cfgMgr, "text.ore_picker.config.enableOutlineOverlay"), cfgMgr.enableOutlineOverlay)
+                    .setSaveConsumer((Boolean v) -> cfgMgr.enableOutlineOverlay = (v != null ? v : false))
+                    .setDefaultValue(false)
+                    .build());
+
+            // --- Outline radius ---
+            general.addEntry(entryBuilder
+                    .startIntField(tr(cfgMgr, "text.ore_picker.config.outlineRadius"), cfgMgr.outlineRadius)
+                    .setDefaultValue(16)
+                    .setSaveConsumer((Integer v) -> {
+                        if (v == null) v = 16;
+                        if (v < 1) v = 1;
+                        if (v > 64) v = 64; // 安全上限
+                        cfgMgr.outlineRadius = v;
+                    })
+                    .build());
+
+
             // Save-time processing: if tempAddById present, add
             builder.setSavingRunnable(() -> {
                 try {
