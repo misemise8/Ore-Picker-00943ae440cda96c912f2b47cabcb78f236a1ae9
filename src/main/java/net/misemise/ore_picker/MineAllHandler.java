@@ -16,7 +16,8 @@ import java.util.*;
 /**
  * MineAllHandler
  * - BEFORE イベントから呼ばれる onBlockBreak(...) を提供
- * - breakConnectedOres は実際の一括破壊ループを行い、各ブロックで AutoCollectHandler.collectDrops(...) を呼ぶ
+ * - 以前は独自の breakConnectedOres を持っていたが、そこではドロップ生成や除去が不完全だったため
+ *   この実装では VeinMiner へ委譲するように変更した（単純化）。
  */
 public class MineAllHandler {
     private static final Set<Block> MINABLE_BLOCKS = Set.of(
@@ -29,9 +30,6 @@ public class MineAllHandler {
             Blocks.REDSTONE_ORE,
             Blocks.EMERALD_ORE
     );
-
-    // 安全上の上限
-    private static final int MAX_BLOCKS = 256;
 
     /**
      * BEFORE イベント向け。true を返すと通常の破壊を継続、false を返すとキャンセルする。
@@ -48,56 +46,28 @@ public class MineAllHandler {
                 serverPlayer.sendMessage(Text.of("鉱石を壊した！: " + brokenBlock.getName().getString()), false);
             } catch (Throwable ignored) {}
 
-            // 実際の一括破壊処理を実行（これで vanilla の破壊処理はキャンセルする）
-            breakConnectedOres(serverWorld, pos, serverPlayer);
+            // VeinMiner に委譲して一括破壊（VeinMiner は実際にブロックを壊してドロップ処理を行う）
+            try {
+                int limit = 64;
+                try {
+                    if (net.misemise.ore_picker.config.ConfigManager.INSTANCE != null) {
+                        limit = net.misemise.ore_picker.config.ConfigManager.INSTANCE.maxVeinSize;
+                        int cap = net.misemise.ore_picker.config.ConfigManager.INSTANCE.maxVeinSizeCap;
+                        if (cap > 0) limit = Math.min(limit, cap);
+                    }
+                } catch (Throwable ignored) {}
+
+                int broken = VeinMiner.mineAndSchedule(serverWorld, serverPlayer, pos, state, serverPlayer.getUuid(), limit, player.getMainHandStack());
+                try {
+                    System.out.println("[MineAllHandler] VeinMiner broken count: " + broken);
+                } catch (Throwable ignored) {}
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+
             return false; // 元の破壊処理はキャンセル
         }
 
         return true;
-    }
-
-    /**
-     * BFS で同じブロック種を探索して壊す（最大 MAX_BLOCKS 個まで）。
-     * 各ブロックについて AutoCollectHandler.collectDrops を呼んで処理を委譲する。
-     */
-    public static void breakConnectedOres(ServerWorld world, BlockPos startPos, ServerPlayerEntity player) {
-        BlockState startState = world.getBlockState(startPos);
-        Block startBlock = startState.getBlock();
-
-        if (!MINABLE_BLOCKS.contains(startBlock)) return;
-
-        Queue<BlockPos> queue = new ArrayDeque<>();
-        Set<BlockPos> visited = new HashSet<>();
-        queue.add(startPos);
-        visited.add(startPos);
-
-        int brokenCount = 0;
-
-        while (!queue.isEmpty() && brokenCount < MAX_BLOCKS) {
-            BlockPos pos = queue.poll();
-            BlockState state = world.getBlockState(pos);
-
-            if (state.getBlock() == startBlock) {
-                // ドロップ回収 + XP 付与 + ブロック削除を AutoCollectHandler に委譲
-                try {
-                    AutoCollectHandler.collectDrops(world, player, pos, state);
-                } catch (Throwable ignored) {}
-
-                brokenCount++;
-
-                // 近傍 3x3x3 を探索
-                for (int dx = -1; dx <= 1; dx++) {
-                    for (int dy = -1; dy <= 1; dy++) {
-                        for (int dz = -1; dz <= 1; dz++) {
-                            BlockPos neighbor = pos.add(dx, dy, dz);
-                            if (!visited.contains(neighbor)) {
-                                visited.add(neighbor);
-                                queue.add(neighbor);
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }

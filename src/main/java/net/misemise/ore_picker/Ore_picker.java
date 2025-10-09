@@ -1,5 +1,17 @@
 package net.misemise.ore_picker;
 
+import net.misemise.ore_picker.config.ConfigManager;
+import net.minecraft.block.BlockState;
+import net.minecraft.item.ItemStack;
+import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.world.World;
+import net.minecraft.util.math.BlockPos;
+
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
@@ -8,20 +20,7 @@ import net.misemise.ore_picker.network.HoldC2SPayload;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 
-import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
-import net.minecraft.world.World;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.block.BlockState;
-import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.item.ItemStack; // ← 追加
-
-import net.misemise.ore_picker.config.ConfigManager;
-
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Server-side initializer (logging-enabled).
@@ -63,7 +62,10 @@ public class Ore_picker implements ModInitializer {
                 ServerPlayerEntity player = context.player();
                 if (player == null) return;
                 UUID uuid = player.getUuid();
+
+                // 保守的に両方更新（互換性確保）
                 playerHoldState.put(uuid, hold);
+                try { KeybindHandler.setHolding(uuid, hold); } catch (Throwable ignored) {}
 
                 // update on server thread and notify
                 context.server().execute(() -> {
@@ -88,35 +90,47 @@ public class Ore_picker implements ModInitializer {
             t.printStackTrace();
         }
 
-        // register block-break AFTER -> schedule next-tick collection
-        PlayerBlockBreakEvents.AFTER.register((World world, PlayerEntity player, BlockPos pos, BlockState state, BlockEntity blockEntity) -> {
+        // register block-break BEFORE -> allow cancellation & schedule collect
+        PlayerBlockBreakEvents.BEFORE.register((World world, net.minecraft.entity.player.PlayerEntity player, BlockPos pos, BlockState state, net.minecraft.block.entity.BlockEntity blockEntity) -> {
             try {
-                // we only schedule on server thread
-                if (!(world instanceof net.minecraft.server.world.ServerWorld serverWorld)) {
-                    return;
+                // server-only behaviour
+                if (!(world instanceof ServerWorld serverWorld)) return true;
+                if (!(player instanceof ServerPlayerEntity serverPlayer)) return true;
+
+                UUID uuid = serverPlayer.getUuid();
+                boolean enabled = false;
+                try {
+                    // 優先して KeybindHandler を参照（より堅牢）
+                    enabled = KeybindHandler.isHolding(uuid);
+                } catch (Throwable ignored) {}
+
+                // 互換性: playerHoldState も確認
+                try {
+                    if (!enabled) enabled = playerHoldState.getOrDefault(uuid, false);
+                } catch (Throwable ignored) {}
+
+                System.out.println("[OrePicker] BEFORE event: player=" + uuid + " enabled=" + enabled + " pos=" + pos);
+
+                if (!enabled) {
+                    return true; // 通常の破壊を続行
                 }
-                if (!(player instanceof ServerPlayerEntity serverPlayer)) {
-                    return;
-                }
 
-                UUID uuid = player.getUuid();
-                boolean enabled = playerHoldState.getOrDefault(uuid, false);
-                System.out.println("[OrePicker] AFTER event: player=" + uuid + " enabled=" + enabled + " pos=" + pos);
-
-                if (!enabled) return;
-
-                // schedule for next tick
-                // 安全にツールをコピーして渡す（null 安全）
+                // schedule for next tick (safe: copy toolstack)
                 ItemStack toolCopy = null;
                 try {
                     ItemStack main = serverPlayer.getMainHandStack();
                     if (main != null) toolCopy = main.copy();
                 } catch (Throwable ignored) {}
 
+                // allowVein = true so CollectScheduler will run VeinMiner
                 CollectScheduler.schedule(serverWorld, pos, uuid, state, true, toolCopy);
-                System.out.println("[OrePicker] Scheduled collect for next tick: " + pos + " for player " + uuid);
+                System.out.println("[OrePicker] Scheduled collect for next tick (VEIN) at: " + pos + " for player " + uuid);
+
+                // cancel vanilla handling (we perform vein mining instead)
+                return false;
             } catch (Throwable t) {
                 t.printStackTrace();
+                return true;
             }
         });
 

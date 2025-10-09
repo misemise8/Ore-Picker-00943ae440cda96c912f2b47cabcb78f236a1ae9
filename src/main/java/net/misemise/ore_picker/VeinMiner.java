@@ -26,7 +26,7 @@ import net.minecraft.util.math.BlockPos;
  * - 各ブロック破壊時に toolStack を利用して drop を生成する（可能な場合は Block.dropStacks を呼ぶ）。
  *
  * 修正:
- * - チャット通知はここでは行わず、VeinMineTracker 側で一元的に行う想定に変更。
+ * - CollectScheduler.schedule に渡す BlockState をそのブロック固有の state (currentState) にした。
  */
 public final class VeinMiner {
     private VeinMiner() {}
@@ -191,9 +191,9 @@ public final class VeinMiner {
                     try { world.setBlockState(p, Blocks.AIR.getDefaultState(), 3); } catch (Throwable ignored) {}
                 }
 
-                // schedule collect for the broken block to pick up its drops (pass toolStack)
+                // schedule collect for the broken block to pick up its drops (pass the actual block state)
                 try {
-                    CollectScheduler.schedule(world, p, playerUuid, originalState, false, toolStack);
+                    CollectScheduler.schedule(world, p, playerUuid, currentState, false, toolStack);
                 } catch (Throwable ignored) {}
 
                 broken++;
