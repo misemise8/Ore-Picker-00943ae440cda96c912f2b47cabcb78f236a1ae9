@@ -8,15 +8,16 @@ import net.misemise.ore_picker.OrePickerLog;
 import net.misemise.ore_picker.config.ConfigManager;
 
 import java.lang.reflect.*;
-import java.util.Objects;
 
 /**
  * HoldHudOverlay - 位置修正版 + ログ出力制限（throttle）
  *
- * 主な改変:
- *  - DrawContext 経路で座標を SCALE で割っていたミスを修正（そのせいで左上に寄っていた）
- *  - ホットバーの上に表示されるように baseBottomOffset を調整（必要なら微調整して）
- *  - debug モードで座標/経路ログを出すが、フレーム毎の大量出力を throttle（間引き）する
+ * 追加:
+ *  - onVeinCountReceived(int) を追加（クライアント側からの一括破壊個数通知を短時間 HUD に表示するため）
+ *
+ * 既存の挙動:
+ *  - HudRenderCallback または mixin 経由で renderOnTop を呼び出す想定
+ *  - debug ログは ConfigManager.INSTANCE.debug に従う（間引きあり）
  */
 public final class HoldHudOverlay {
     private HoldHudOverlay() {}
@@ -25,21 +26,26 @@ public final class HoldHudOverlay {
     private static final float SCALE = 1.2f;
     private static final int COLOR_RGB = 0x9AFF66; // RRGGBB
 
-    // 最小可視アルファ（小さすぎると 1 バイト丸めでちらつく）
     private static final float MIN_VISIBLE_OPACITY = 0.03f;
 
     // hold state
     private static volatile boolean lastHold = false;
     private static volatile long lastChangeTime = System.currentTimeMillis();
 
-    // HUD 登録済みフラグ（HudRenderCallback 経由登録の有無）
+    // HUD 登録済みフラグ
     private static volatile boolean registeredViaHudCallback = false;
 
     // ログの間引き用
     private static volatile long lastHandlerLogMs = 0L;
     private static volatile long lastRenderLogMs = 0L;
-    private static final long HANDLER_LOG_THROTTLE_MS = 1000L; // handler invoked は最大 1 秒に 1 回
-    private static final long RENDER_LOG_THROTTLE_MS = 250L;  // renderOnTop の詳細は最大 250ms に 1 回
+    private static final long HANDLER_LOG_THROTTLE_MS = 1000L;
+    private static final long RENDER_LOG_THROTTLE_MS = 250L;
+
+    // ——— Vein count 表示関連 ———
+    // クライアント側（例: サーバの通知）から onVeinCountReceived により更新される想定
+    private static volatile int lastVeinCount = 0;
+    private static volatile long lastVeinCountMs = 0L;
+    private static final long VEIN_COUNT_DISPLAY_MS = 2500L; // 2.5秒だけ表示
 
     public static void onHoldChanged(boolean hold) {
         if (hold != lastHold) {
@@ -53,6 +59,23 @@ public final class HoldHudOverlay {
         long elapsed = System.currentTimeMillis() - lastChangeTime;
         if (elapsed >= FADE_MS) return 0f;
         return 1.0f - (float) elapsed / (float) FADE_MS;
+    }
+
+    /**
+     * クライアント側から「一括破壊で壊した個数」を通知するために呼ばれるメソッド。
+     * 受け取った値は短時間 HUD に表示される（VEIN_COUNT_DISPLAY_MS）。
+     *
+     * 呼び出しは別スレッド（ネットワークスレッド）から来る可能性があるため、
+     * 値設定自体は volatile フィールドへ行い、描画は renderOnTop 側で扱う。
+     */
+    public static void onVeinCountReceived(int count) {
+        try {
+            lastVeinCount = Math.max(0, count);
+            lastVeinCountMs = System.currentTimeMillis();
+            OrePickerLog.debug("onVeinCountReceived: " + lastVeinCount);
+        } catch (Throwable t) {
+            // 念のため握りつぶす（HUD は非致命的）
+        }
     }
 
     /**
@@ -188,7 +211,15 @@ public final class HoldHudOverlay {
 
             if (client == null) return;
 
+            // ベースの文字列（必要なら翻訳 API に差し替え）
             String textStr = "OrePicker: Running";
+
+            // Vein count を最近受け取っていれば追加表示
+            long nowMs = System.currentTimeMillis();
+            if (lastVeinCount > 0 && (nowMs - lastVeinCountMs) <= VEIN_COUNT_DISPLAY_MS) {
+                textStr = textStr + " (+" + lastVeinCount + ")";
+            }
+
             Text labelText = Text.literal(textStr);
             OrderedText ordered = labelText.asOrderedText();
 
@@ -198,8 +229,7 @@ public final class HoldHudOverlay {
             int textWidth = tryGetTextWidth(client, textStr, ordered, labelText);
             int fontH = tryGetFontHeight(client);
 
-            // ここを調整してホットバーの上に出す
-            float baseBottomOffset = 44f; // ホットバー + マージン相当。微調整してね。
+            float baseBottomOffset = 44f;
 
             float xf = (sw / 2f) - (textWidth * SCALE / 2f);
             float yf = (sh - baseBottomOffset - (fontH * SCALE));
@@ -218,7 +248,6 @@ public final class HoldHudOverlay {
                 }
             }
 
-            // depth を無効化して上に描く（多くのケースでチャットより上に出る）
             try { RenderSystem.disableDepthTest(); } catch (Throwable ignored) {}
             try { RenderSystem.enableBlend(); } catch (Throwable ignored) {}
 
@@ -231,7 +260,6 @@ public final class HoldHudOverlay {
 
             boolean drawn = false;
 
-            // matrixStack 系
             if (matrixOrDrawContext != null && matrixOrDrawContext.getClass().getName().toLowerCase().contains("matrix")) {
                 drawn = tryDrawWithTextRendererUsingMatrix(client, matrixOrDrawContext, textStr, labelText, ordered, xf, yf, tint, SCALE);
                 if (debug) {
@@ -246,7 +274,6 @@ public final class HoldHudOverlay {
                     }
                 }
             } else {
-                // DrawContext（あるいは DrawContext ライク）経路 — ここで座標は SCALE で割らない（重要）
                 if (matrixOrDrawContext != null) {
                     drawn = tryDrawWithDrawContextReflection(matrixOrDrawContext, client, textStr, labelText, ordered, xf, yf, tint);
                     if (debug) {
