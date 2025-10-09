@@ -4,20 +4,15 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.text.OrderedText;
 import net.minecraft.text.Text;
-import net.misemise.ore_picker.OrePickerLog;
 import net.misemise.ore_picker.config.ConfigManager;
 
 import java.lang.reflect.*;
 
 /**
- * HoldHudOverlay - 位置修正版 + ログ出力制限（throttle）
+ * HoldHudOverlay - 位置修正版 + vein count 受け口追加
  *
- * 追加:
- *  - onVeinCountReceived(int) を追加（クライアント側からの一括破壊個数通知を短時間 HUD に表示するため）
- *
- * 既存の挙動:
- *  - HudRenderCallback または mixin 経由で renderOnTop を呼び出す想定
- *  - debug ログは ConfigManager.INSTANCE.debug に従う（間引きあり）
+ * - 既存の描画互換性を保ちつつ、サーバから来る vein count を受け取るメソッドを追加
+ * - 小さな表示ロジックの改善（vein count を一定時間表示）
  */
 public final class HoldHudOverlay {
     private HoldHudOverlay() {}
@@ -26,26 +21,20 @@ public final class HoldHudOverlay {
     private static final float SCALE = 1.2f;
     private static final int COLOR_RGB = 0x9AFF66; // RRGGBB
 
+    // 最小可視アルファ（小さすぎると 1 バイト丸めでちらつく）
     private static final float MIN_VISIBLE_OPACITY = 0.03f;
 
     // hold state
     private static volatile boolean lastHold = false;
     private static volatile long lastChangeTime = System.currentTimeMillis();
 
-    // HUD 登録済みフラグ
+    // HUD 登録済みフラグ（HudRenderCallback 経由登録の有無）
     private static volatile boolean registeredViaHudCallback = false;
 
-    // ログの間引き用
-    private static volatile long lastHandlerLogMs = 0L;
-    private static volatile long lastRenderLogMs = 0L;
-    private static final long HANDLER_LOG_THROTTLE_MS = 1000L;
-    private static final long RENDER_LOG_THROTTLE_MS = 250L;
-
-    // ——— Vein count 表示関連 ———
-    // クライアント側（例: サーバの通知）から onVeinCountReceived により更新される想定
+    // vein count 表示用
     private static volatile int lastVeinCount = 0;
-    private static volatile long lastVeinCountMs = 0L;
-    private static final long VEIN_COUNT_DISPLAY_MS = 2500L; // 2.5秒だけ表示
+    private static volatile long lastVeinCountTime = 0L;
+    private static final long VEIN_COUNT_DISPLAY_MS = 2000L; // 2 秒だけ表示
 
     public static void onHoldChanged(boolean hold) {
         if (hold != lastHold) {
@@ -54,28 +43,19 @@ public final class HoldHudOverlay {
         }
     }
 
+    /**
+     * サーバからの vein_count を受け取るための公開メソッド（Ore_pickerClient から呼び出す）
+     */
+    public static void onVeinCountReceived(int count) {
+        lastVeinCount = count;
+        lastVeinCountTime = System.currentTimeMillis();
+    }
+
     private static float computeOpacity() {
         if (lastHold) return 1.0f;
         long elapsed = System.currentTimeMillis() - lastChangeTime;
         if (elapsed >= FADE_MS) return 0f;
         return 1.0f - (float) elapsed / (float) FADE_MS;
-    }
-
-    /**
-     * クライアント側から「一括破壊で壊した個数」を通知するために呼ばれるメソッド。
-     * 受け取った値は短時間 HUD に表示される（VEIN_COUNT_DISPLAY_MS）。
-     *
-     * 呼び出しは別スレッド（ネットワークスレッド）から来る可能性があるため、
-     * 値設定自体は volatile フィールドへ行い、描画は renderOnTop 側で扱う。
-     */
-    public static void onVeinCountReceived(int count) {
-        try {
-            lastVeinCount = Math.max(0, count);
-            lastVeinCountMs = System.currentTimeMillis();
-            OrePickerLog.debug("onVeinCountReceived: " + lastVeinCount);
-        } catch (Throwable t) {
-            // 念のため握りつぶす（HUD は非致命的）
-        }
     }
 
     /**
@@ -95,7 +75,7 @@ public final class HoldHudOverlay {
                 }
             }
             if (registerMethod == null) {
-                OrePickerLog.debug("HudRenderCallback.EVENT.register(...) not found - HUD not registered via API.");
+                System.err.println("[OrePicker] HudRenderCallback.EVENT.register(...) not found - HUD not registered via API.");
                 return;
             }
 
@@ -106,23 +86,19 @@ public final class HoldHudOverlay {
                 try { debug = (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug); } catch (Throwable ignored) {}
 
                 if (debug) {
-                    long now = System.currentTimeMillis();
-                    if (now - lastHandlerLogMs > HANDLER_LOG_THROTTLE_MS) {
-                        StringBuilder sb = new StringBuilder();
-                        sb.append("handler invoked - method=").append(method.getName()).append(" args=");
-                        if (args == null) sb.append("null");
-                        else {
-                            sb.append("[");
-                            for (int i = 0; i < args.length; i++) {
-                                Object a = args[i];
-                                sb.append(i).append(":").append(a == null ? "null" : a.getClass().getSimpleName());
-                                if (i + 1 < args.length) sb.append(",");
-                            }
-                            sb.append("]");
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("[OrePicker][HUD] handler invoked - method=").append(method.getName()).append(" args=");
+                    if (args == null) sb.append("null");
+                    else {
+                        sb.append("[");
+                        for (int i = 0; i < args.length; i++) {
+                            Object a = args[i];
+                            sb.append(i).append(":").append(a == null ? "null" : a.getClass().getSimpleName());
+                            if (i + 1 < args.length) sb.append(",");
                         }
-                        OrePickerLog.hud(sb.toString());
-                        lastHandlerLogMs = now;
+                        sb.append("]");
                     }
+                    System.out.println(sb.toString());
                 }
 
                 try {
@@ -161,15 +137,16 @@ public final class HoldHudOverlay {
             try {
                 registerMethod.invoke(eventObj, listenerProxy);
                 registeredViaHudCallback = true;
-                OrePickerLog.info("HUD overlay registered (via HudRenderCallback).");
+                System.out.println("[OrePicker] HUD overlay registered (via HudRenderCallback).");
             } catch (Throwable ite) {
-                OrePickerLog.debug("HudRenderCallback registration failed (non-fatal).");
+                System.err.println("[OrePicker] HudRenderCallback registration failed (non-fatal).");
                 try { if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) ite.printStackTrace(); } catch (Throwable ignored) {}
             }
         } catch (ClassNotFoundException cnf) {
-            OrePickerLog.debug("HudRenderCallback not present at runtime; rely on mixin fallback.");
+            System.out.println("[OrePicker] HudRenderCallback not present at runtime; rely on mixin fallback.");
         } catch (Throwable t) {
-            OrePickerLog.error("register() unexpected error:", t);
+            System.err.println("[OrePicker] register() unexpected error:");
+            t.printStackTrace();
         }
     }
 
@@ -183,41 +160,29 @@ public final class HoldHudOverlay {
             try { debug = (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug); } catch (Throwable ignored) {}
 
             try { if (ConfigManager.INSTANCE != null && !ConfigManager.INSTANCE.enableHudOverlay) {
-                if (debug) OrePickerLog.hud("renderOnTop skipped: enableHudOverlay=false");
+                if (debug) System.out.println("[OrePicker][HUD] renderOnTop skipped: enableHudOverlay=false");
                 return;
             } } catch (Throwable ignored) {}
 
             float opacity = computeOpacity();
             if (opacity <= 0f) {
-                if (debug) {
-                    long now = System.currentTimeMillis();
-                    if (now - lastRenderLogMs > RENDER_LOG_THROTTLE_MS) {
-                        OrePickerLog.hud("opacity <= 0, skip");
-                        lastRenderLogMs = now;
-                    }
-                }
+                if (debug) System.out.println("[OrePicker][HUD] opacity <= 0, skip");
                 return;
             }
             if (opacity < MIN_VISIBLE_OPACITY) {
-                if (debug) {
-                    long now = System.currentTimeMillis();
-                    if (now - lastRenderLogMs > RENDER_LOG_THROTTLE_MS) {
-                        OrePickerLog.hud("opacity " + opacity + " below MIN_VISIBLE_OPACITY, skip");
-                        lastRenderLogMs = now;
-                    }
-                }
+                if (debug) System.out.println("[OrePicker][HUD] opacity " + opacity + " below MIN_VISIBLE_OPACITY, skip");
                 return;
             }
 
             if (client == null) return;
 
-            // ベースの文字列（必要なら翻訳 API に差し替え）
-            String textStr = "OrePicker: Running";
-
-            // Vein count を最近受け取っていれば追加表示
-            long nowMs = System.currentTimeMillis();
-            if (lastVeinCount > 0 && (nowMs - lastVeinCountMs) <= VEIN_COUNT_DISPLAY_MS) {
-                textStr = textStr + " (+" + lastVeinCount + ")";
+            // show vein count if recently received
+            String textStr;
+            long now = System.currentTimeMillis();
+            if (lastVeinCount > 0 && now - lastVeinCountTime <= VEIN_COUNT_DISPLAY_MS) {
+                textStr = "OrePicker: Vein " + lastVeinCount;
+            } else {
+                textStr = "OrePicker: Running";
             }
 
             Text labelText = Text.literal(textStr);
@@ -229,7 +194,8 @@ public final class HoldHudOverlay {
             int textWidth = tryGetTextWidth(client, textStr, ordered, labelText);
             int fontH = tryGetFontHeight(client);
 
-            float baseBottomOffset = 44f;
+            // ここを調整してホットバーの上に出す
+            float baseBottomOffset = 44f; // ホットバー + マージン相当。微調整してね。
 
             float xf = (sw / 2f) - (textWidth * SCALE / 2f);
             float yf = (sh - baseBottomOffset - (fontH * SCALE));
@@ -239,15 +205,12 @@ public final class HoldHudOverlay {
             int tint = (alphaByte << 24) | COLOR_RGB;
 
             if (debug) {
-                long now = System.currentTimeMillis();
-                if (now - lastRenderLogMs > RENDER_LOG_THROTTLE_MS) {
-                    OrePickerLog.hud("renderOnTop: opacity=" + opacity + " alphaByte=" + alphaByte +
-                            " texW=" + textWidth + " sw=" + sw + " sh=" + sh + " xf=" + xf + " yf=" + yf +
-                            " ctx=" + (matrixOrDrawContext == null ? "null" : matrixOrDrawContext.getClass().getSimpleName()));
-                    lastRenderLogMs = now;
-                }
+                System.out.println("[OrePicker][HUD] renderOnTop: opacity=" + opacity + " alphaByte=" + alphaByte +
+                        " texW=" + textWidth + " sw=" + sw + " sh=" + sh + " xf=" + xf + " yf=" + yf +
+                        " ctx=" + (matrixOrDrawContext == null ? "null" : matrixOrDrawContext.getClass().getSimpleName()));
             }
 
+            // depth を無効化して上に描く（多くのケースでチャットより上に出る）
             try { RenderSystem.disableDepthTest(); } catch (Throwable ignored) {}
             try { RenderSystem.enableBlend(); } catch (Throwable ignored) {}
 
@@ -260,33 +223,23 @@ public final class HoldHudOverlay {
 
             boolean drawn = false;
 
+            // matrixStack 系
             if (matrixOrDrawContext != null && matrixOrDrawContext.getClass().getName().toLowerCase().contains("matrix")) {
                 drawn = tryDrawWithTextRendererUsingMatrix(client, matrixOrDrawContext, textStr, labelText, ordered, xf, yf, tint, SCALE);
-                if (debug) {
-                    long now = System.currentTimeMillis();
-                    if (now - lastRenderLogMs > RENDER_LOG_THROTTLE_MS) OrePickerLog.hud("tryDrawWithTextRendererUsingMatrix -> " + drawn);
-                }
+                if (debug) System.out.println("[OrePicker][HUD] tryDrawWithTextRendererUsingMatrix -> " + drawn);
                 if (!drawn) {
                     drawn = tryDrawWithTextRendererFallback(client, textStr, labelText, ordered, xf, yf, tint, SCALE);
-                    if (debug) {
-                        long now = System.currentTimeMillis();
-                        if (now - lastRenderLogMs > RENDER_LOG_THROTTLE_MS) OrePickerLog.hud("tryDrawWithTextRendererFallback -> " + drawn);
-                    }
+                    if (debug) System.out.println("[OrePicker][HUD] tryDrawWithTextRendererFallback -> " + drawn);
                 }
             } else {
+                // DrawContext（あるいは DrawContext ライク）経路 — ここで座標は S CALE で割らない（重要）
                 if (matrixOrDrawContext != null) {
                     drawn = tryDrawWithDrawContextReflection(matrixOrDrawContext, client, textStr, labelText, ordered, xf, yf, tint);
-                    if (debug) {
-                        long now = System.currentTimeMillis();
-                        if (now - lastRenderLogMs > RENDER_LOG_THROTTLE_MS) OrePickerLog.hud("tryDrawWithDrawContextReflection -> " + drawn);
-                    }
+                    if (debug) System.out.println("[OrePicker][HUD] tryDrawWithDrawContextReflection -> " + drawn);
                 }
                 if (!drawn) {
                     drawn = tryDrawWithTextRendererFallback(client, textStr, labelText, ordered, xf, yf, tint, SCALE);
-                    if (debug) {
-                        long now = System.currentTimeMillis();
-                        if (now - lastRenderLogMs > RENDER_LOG_THROTTLE_MS) OrePickerLog.hud("tryDrawWithTextRendererFallback (2) -> " + drawn);
-                    }
+                    if (debug) System.out.println("[OrePicker][HUD] tryDrawWithTextRendererFallback (2) -> " + drawn);
                 }
             }
 
@@ -295,8 +248,7 @@ public final class HoldHudOverlay {
             try { RenderSystem.disableBlend(); } catch (Throwable ignored) {}
 
             if (debug && !drawn) {
-                long now = System.currentTimeMillis();
-                if (now - lastRenderLogMs > RENDER_LOG_THROTTLE_MS) OrePickerLog.hud("WARNING: no drawing method succeeded this frame.");
+                System.out.println("[OrePicker][HUD] WARNING: no drawing method succeeded this frame.");
             }
 
         } catch (Throwable t) {

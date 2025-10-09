@@ -5,6 +5,7 @@ import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 
 import net.minecraft.client.option.KeyBinding;
+import net.misemise.ore_picker.client.rendering.OutlineRenderer;
 import org.lwjgl.glfw.GLFW;
 
 import net.misemise.ore_picker.network.HoldC2SPayload;
@@ -27,6 +28,10 @@ import net.minecraft.util.math.BlockPos;
  *  - register client receiver for orepicker:vein_count (various registerGlobalReceiver signatures)
  *
  * This aims to survive mapping / Fabric API differences.
+ *
+ * 修正点:
+ * - HoldHudOverlay.onVeinCountReceived(...) を直接呼ばない（存在しないとコンパイルエラーになるため）
+ *   -> リフレクション経由で存在すれば呼ぶ（互換性確保）
  */
 public class Ore_pickerClient implements ClientModInitializer {
     private static KeyBinding holdKey;
@@ -90,6 +95,18 @@ public class Ore_pickerClient implements ClientModInitializer {
         } catch (Throwable t) {
             System.err.println("[OrePickerClient] HoldHudOverlay.register() threw:");
             t.printStackTrace();
+        }
+
+        // Outline renderer registration (client-side visualizer for selected blocks)
+        try {
+            OutlineRenderer.register();
+        } catch (Throwable t) {
+            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                System.err.println("[OrePickerClient] OutlineRenderer.register() threw:");
+                t.printStackTrace();
+            } else {
+                System.err.println("[OrePickerClient] OutlineRenderer not registered (debug disabled).");
+            }
         }
 
         // register vein_count receiver (robust)
@@ -308,7 +325,7 @@ public class Ore_pickerClient implements ClientModInitializer {
     /**
      * Register a receiver for "orepicker:vein_count" using a robust reflective strategy.
      * The handler will read one int/varint/byte and write it into lastVeinCount + veinCountTimeMs,
-     * and call HoldHudOverlay.onVeinCountReceived(count).
+     * and call HoldHudOverlay.onVeinCountReceived(count) if that method exists (via reflection).
      */
     private static void registerVeinCountReceiverRobust() throws Exception {
         Class<?> clientPlayNet;
@@ -411,7 +428,10 @@ public class Ore_pickerClient implements ClientModInitializer {
                                     try {
                                         lastVeinCount = fb;
                                         veinCountTimeMs = System.currentTimeMillis();
-                                        try { HoldHudOverlay.onVeinCountReceived(fb); } catch (Throwable ignored) {}
+                                        // リフレクションで HoldHudOverlay に通知（存在すれば呼ぶ）
+                                        try {
+                                            notifyHoldHudOverlayVeinCount(fb);
+                                        } catch (Throwable ignored) {}
                                         if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
                                             System.out.println("[OrePickerClient] Received vein_count = " + fb);
                                         }
@@ -420,12 +440,12 @@ public class Ore_pickerClient implements ClientModInitializer {
                             } catch (NoSuchMethodException nsme) {
                                 lastVeinCount = fb;
                                 veinCountTimeMs = System.currentTimeMillis();
-                                try { HoldHudOverlay.onVeinCountReceived(fb); } catch (Throwable ignored) {}
+                                try { notifyHoldHudOverlayVeinCount(fb); } catch (Throwable ignored) {}
                             }
                         } catch (Throwable t) {
                             lastVeinCount = fb;
                             veinCountTimeMs = System.currentTimeMillis();
-                            try { HoldHudOverlay.onVeinCountReceived(fb); } catch (Throwable ignored) {}
+                            try { notifyHoldHudOverlayVeinCount(fb); } catch (Throwable ignored) {}
                         }
                     } catch (Throwable t) {
                         if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) t.printStackTrace();
@@ -492,5 +512,45 @@ public class Ore_pickerClient implements ClientModInitializer {
 
         // if we reach here, registration failed
         throw new RuntimeException("Failed to register vein_count receiver: could not coerce id argument.");
+    }
+
+    /**
+     * HoldHudOverlay に対してリフレクションで notify を投げる（メソッドが存在すれば呼ぶ）。
+     * - onVeinCountReceived(int)
+     * - onVeinCountReceived(java.lang.Integer)
+     * などいくつかのシグネチャに幅広く対応する。
+     */
+    private static void notifyHoldHudOverlayVeinCount(int count) {
+        try {
+            Class<?> cls = Class.forName("net.misemise.ore_picker.client.HoldHudOverlay");
+            Method[] methods = cls.getMethods();
+            for (Method m : methods) {
+                if (!m.getName().equals("onVeinCountReceived")) continue;
+                Class<?>[] pts = m.getParameterTypes();
+                if (pts.length != 1) continue;
+                try {
+                    if (pts[0] == int.class) {
+                        m.invoke(null, count);
+                        return;
+                    } else if (pts[0] == Integer.class) {
+                        m.invoke(null, Integer.valueOf(count));
+                        return;
+                    } else if (pts[0] == long.class) {
+                        m.invoke(null, (long) count);
+                        return;
+                    } else if (pts[0] == String.class) {
+                        m.invoke(null, Integer.toString(count));
+                        return;
+                    }
+                } catch (IllegalArgumentException iae) {
+                    // try next overload if any
+                }
+            }
+        } catch (ClassNotFoundException cnf) {
+            // HoldHudOverlay クラスが見つからないなら何もしない
+        } catch (Throwable t) {
+            // 例外は抑えてクライアントを落とさない
+            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) t.printStackTrace();
+        }
     }
 }
