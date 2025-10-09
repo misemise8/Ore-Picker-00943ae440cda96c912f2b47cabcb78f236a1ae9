@@ -85,7 +85,7 @@ public final class CollectScheduler {
 
         PENDING.add(new ScheduledCollect(world, pos, state, playerUuid, allowVein, toolCopy));
         try {
-            System.out.println("[CollectScheduler] queued collect for " + playerUuid + " at " + pos + " allowVein=" + allowVein + " tool=" + (toolCopy != null));
+            OrePickerLog.debug("queued collect for " + playerUuid + " at " + pos + " allowVein=" + allowVein + " tool=" + (toolCopy != null));
         } catch (Throwable ignored) {}
     }
 
@@ -109,7 +109,7 @@ public final class CollectScheduler {
         }
         try {
             if (processed > 0) {
-                System.out.println("[CollectScheduler] processed " + processed + " scheduled collects this tick.");
+                OrePickerLog.debug("processed " + processed + " scheduled collects this tick.");
             }
         } catch (Throwable ignored) {}
     }
@@ -161,10 +161,8 @@ public final class CollectScheduler {
                 if (!applyInCreative) {
                     try {
                         if (player.interactionManager != null && player.interactionManager.getGameMode().isCreative()) {
-                            // Player がクリエイティブかつ設定でクリエイティブ無効 → スキップ
                             return;
                         }
-                        // 上の API は mappings/MCバージョンにより無い場合もあるが、失敗しても次でプレイヤーの isCreative を使う
                     } catch (Throwable ignored) {
                         try {
                             if (player.isCreative()) return;
@@ -173,7 +171,7 @@ public final class CollectScheduler {
                 }
 
                 // ----- ツール条件（つるはしのみ）チェック -----
-                boolean requirePickaxe = true; // デフォルト true
+                boolean requirePickaxe = true;
                 try {
                     if (ConfigManager.INSTANCE != null) requirePickaxe = ConfigManager.INSTANCE.requirePickaxeForVein;
                 } catch (Throwable ignored) {}
@@ -187,7 +185,6 @@ public final class CollectScheduler {
                                 if (usedTool.getItem() instanceof PickaxeItem) {
                                     hasPickaxe = true;
                                 } else {
-                                    // フォールバック: アイテムのクラス名に "Pickaxe" を含むかで判定
                                     try {
                                         String cls = usedTool.getItem().getClass().getSimpleName().toLowerCase();
                                         if (cls.contains("pickaxe") || cls.contains("pickaxeitem")) hasPickaxe = true;
@@ -198,7 +195,6 @@ public final class CollectScheduler {
                     } catch (Throwable ignored) {}
 
                     if (!hasPickaxe) {
-                        // ツールがつるはしでないなら Vein を行わない
                         return;
                     }
                 }
@@ -219,7 +215,7 @@ public final class CollectScheduler {
                 try {
                     int broken = VeinMiner.mineAndSchedule(sc.world, player, sc.pos, sc.state, sc.playerUuid, limit, sc.toolStack);
                     try {
-                        System.out.println("[CollectScheduler] Vein broken: " + broken + " " + (sc.state != null ? sc.state.getBlock().toString() : "unknown"));
+                        OrePickerLog.debug("Vein broken: " + broken + " " + (sc.state != null ? sc.state.getBlock().toString() : "unknown"));
                     } catch (Throwable ignored) {}
                 } catch (Throwable t) {
                     t.printStackTrace();

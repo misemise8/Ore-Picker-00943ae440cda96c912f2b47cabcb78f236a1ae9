@@ -71,7 +71,7 @@ public class AutoCollectHandler {
      * 新しいシグネチャ: toolStack を優先して SilkTouch 判定を行う
      */
     public static void collectDrops(World world, PlayerEntity player, BlockPos pos, BlockState state, ItemStack toolStack) {
-        System.out.println("[AutoCollectHandler] collectDrops called pos=" + pos + " block=" + (state != null ? state.getBlock().toString() : "null"));
+        OrePickerLog.debug("collectDrops called pos=" + pos + " block=" + (state != null ? state.getBlock().toString() : "null"));
 
         if (!(world instanceof ServerWorld serverWorld)) return;
         if (!(player instanceof ServerPlayerEntity serverPlayer)) return;
@@ -91,7 +91,7 @@ public class AutoCollectHandler {
         try {
             if (toolStack != null) {
                 try {
-                    System.out.println("[AutoCollectHandler][DEBUG] received toolStack = " + toolStack.toString());
+                    OrePickerLog.debug("[AutoCollectHandler][DEBUG] received toolStack = " + toolStack.toString());
                 } catch (Throwable e5) {}
                 if (robustHasSilkTouch(toolStack)) hasSilkTouch = true;
             }
@@ -99,7 +99,7 @@ public class AutoCollectHandler {
                 try {
                     ItemStack main = serverPlayer.getMainHandStack();
                     if (main != null) {
-                        try { System.out.println("[AutoCollectHandler][DEBUG] player's mainHand = " + main.toString()); } catch (Throwable e6) {}
+                        try { OrePickerLog.debug("[AutoCollectHandler][DEBUG] player's mainHand = " + main.toString()); } catch (Throwable e6) {}
                         if (robustHasSilkTouch(main)) hasSilkTouch = true;
                     }
                 } catch (Throwable e7) {}
@@ -108,7 +108,7 @@ public class AutoCollectHandler {
                 try {
                     ItemStack off = serverPlayer.getOffHandStack();
                     if (off != null) {
-                        try { System.out.println("[AutoCollectHandler][DEBUG] player's offHand = " + off.toString()); } catch (Throwable e8) {}
+                        try { OrePickerLog.debug("[AutoCollectHandler][DEBUG] player's offHand = " + off.toString()); } catch (Throwable e8) {}
                         if (robustHasSilkTouch(off)) hasSilkTouch = true;
                     }
                 } catch (Throwable e9) {}
@@ -116,7 +116,7 @@ public class AutoCollectHandler {
         } catch (Throwable e10) {}
         // --------------------------------------------------------
 
-        System.out.println("[AutoCollectHandler][DEBUG] hasSilkTouch=" + hasSilkTouch);
+        OrePickerLog.debug("[AutoCollectHandler][DEBUG] hasSilkTouch=" + hasSilkTouch);
 
         boolean anyInserted = false;
 
@@ -132,7 +132,7 @@ public class AutoCollectHandler {
             Box box = new Box(pos.getX() - radius, pos.getY() - radius, pos.getZ() - radius,
                     pos.getX() + radius, pos.getY() + radius, pos.getZ() + radius);
             List<ItemEntity> items = serverWorld.getEntitiesByClass(ItemEntity.class, box, e -> true);
-            System.out.println("[AutoCollectHandler] found " + items.size() + " item entities near " + pos);
+            OrePickerLog.debug("found " + items.size() + " item entities near " + pos);
             for (ItemEntity ie : items) {
                 try {
                     ItemStack stack = ie.getStack();
@@ -190,7 +190,7 @@ public class AutoCollectHandler {
 
         // Silk Touch: バニラに合わせて XP は与えない
         if (hasSilkTouch) {
-            System.out.println("[AutoCollectHandler][DEBUG] silkTouch detected -> xp set to 0");
+            OrePickerLog.debug("[AutoCollectHandler][DEBUG] silkTouch detected -> xp set to 0");
             xp = 0;
         }
 
@@ -200,7 +200,7 @@ public class AutoCollectHandler {
                 Box orbBox = new Box(pos.getX() - 2.5, pos.getY() - 2.5, pos.getZ() - 2.5,
                         pos.getX() + 2.5, pos.getY() + 2.5, pos.getZ() + 2.5);
                 List<ExperienceOrbEntity> orbs = serverWorld.getEntitiesByClass(ExperienceOrbEntity.class, orbBox, e -> true);
-                System.out.println("[AutoCollectHandler] found " + orbs.size() + " xp orbs near " + pos);
+                OrePickerLog.debug("found " + orbs.size() + " xp orbs near " + pos);
                 for (ExperienceOrbEntity orb : orbs) {
                     try {
                         orb.remove(net.minecraft.entity.Entity.RemovalReason.DISCARDED);
@@ -212,8 +212,7 @@ public class AutoCollectHandler {
 
             // プレイヤーへ直接付与
             try {
-                // デバッグ: 与える xp をログ出力
-                System.out.println("[AutoCollectHandler][DEBUG] awarding xp=" + xp + " to player=" + serverPlayer.getGameProfile().getName());
+                OrePickerLog.debug("[AutoCollectHandler][DEBUG] awarding xp=" + xp + " to player=" + serverPlayer.getGameProfile().getName());
                 serverPlayer.addExperience(xp);
                 try {
                     serverWorld.playSound(null,

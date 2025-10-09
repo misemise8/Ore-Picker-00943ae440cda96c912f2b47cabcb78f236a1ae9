@@ -30,23 +30,21 @@ public class Ore_picker implements ModInitializer {
 
     @Override
     public void onInitialize() {
-        System.out.println("[OrePicker] server initializing (logging-enabled)");
+        OrePickerLog.info("server initializing (logging-enabled)");
 
         // Load config first (creates config/orepicker.properties if missing)
         try {
             ConfigManager.load();
         } catch (Throwable t) {
-            System.err.println("[OrePicker] Failed to load config:");
-            t.printStackTrace();
+            OrePickerLog.error("Failed to load config:", t);
         }
 
         // register payload codec (server-side)
         try {
             PayloadTypeRegistry.playC2S().register(HoldC2SPayload.TYPE, HoldC2SPayload.CODEC);
-            System.out.println("[OrePicker] Registered HoldC2SPayload codec for " + HoldC2SPayload.ID);
+            OrePickerLog.info("Registered HoldC2SPayload codec for " + HoldC2SPayload.ID);
         } catch (Throwable t) {
-            System.err.println("[OrePicker] Failed to register codec (server):");
-            t.printStackTrace();
+            OrePickerLog.error("Failed to register codec (server):", t);
         }
 
         // register receiver
@@ -78,16 +76,14 @@ public class Ore_picker implements ModInitializer {
                         }
                     } catch (Throwable ignored) {}
 
-                    // 常にコンソールには出す（デバッグの有無に関係なくログを見たい場合）
                     try {
-                        System.out.println("[OrePicker] Received hold state from " + player.getGameProfile().getName() + ": " + hold);
+                        OrePickerLog.debug("Received hold state from " + player.getGameProfile().getName() + ": " + hold);
                     } catch (Throwable ignored) {}
                 });
             });
-            System.out.println("[OrePicker] Registered payload receiver.");
+            OrePickerLog.info("Registered payload receiver.");
         } catch (Throwable t) {
-            System.err.println("[OrePicker] Failed to register payload receiver:");
-            t.printStackTrace();
+            OrePickerLog.error("Failed to register payload receiver:", t);
         }
 
         // register block-break BEFORE -> allow cancellation & schedule collect
@@ -109,7 +105,7 @@ public class Ore_picker implements ModInitializer {
                     if (!enabled) enabled = playerHoldState.getOrDefault(uuid, false);
                 } catch (Throwable ignored) {}
 
-                System.out.println("[OrePicker] BEFORE event: player=" + uuid + " enabled=" + enabled + " pos=" + pos);
+                OrePickerLog.debug("BEFORE event: player=" + uuid + " enabled=" + enabled + " pos=" + pos);
 
                 if (!enabled) {
                     return true; // 通常の破壊を続行
@@ -124,7 +120,7 @@ public class Ore_picker implements ModInitializer {
 
                 // allowVein = true so CollectScheduler will run VeinMiner
                 CollectScheduler.schedule(serverWorld, pos, uuid, state, true, toolCopy);
-                System.out.println("[OrePicker] Scheduled collect for next tick (VEIN) at: " + pos + " for player " + uuid);
+                OrePickerLog.debug("Scheduled collect for next tick (VEIN) at: " + pos + " for player " + uuid);
 
                 // cancel vanilla handling (we perform vein mining instead)
                 return false;
@@ -152,6 +148,6 @@ public class Ore_picker implements ModInitializer {
             } catch (Throwable ignored) {}
         });
 
-        System.out.println("[OrePicker] server initialization complete");
+        OrePickerLog.info("server initialization complete");
     }
 }

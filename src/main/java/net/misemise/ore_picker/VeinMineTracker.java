@@ -1,13 +1,13 @@
 package net.misemise.ore_picker;
 
-import net.misemise.ore_picker.config.ConfigManager;
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.text.Text;
-
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+
+import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.text.Text;
+import net.misemise.ore_picker.config.ConfigManager;
 
 /**
  * VeinMineTracker
@@ -51,12 +51,23 @@ public final class VeinMineTracker {
         if (cnt == null) cnt = 0;
         if (id == null) id = "unknown";
 
+        // チャット出力は設定依存にする
+        boolean allowChat = false;
         try {
-            boolean logChat = false;
-            if (ConfigManager.INSTANCE != null) logChat = ConfigManager.INSTANCE.logToChat;
-            if (logChat) {
+            if (ConfigManager.INSTANCE != null) {
+                allowChat = ConfigManager.INSTANCE.logToChat || ConfigManager.INSTANCE.debug;
+            }
+        } catch (Throwable ignored) {}
+
+        try {
+            if (allowChat) {
                 player.sendMessage(Text.literal("Broke " + cnt + " " + id), false);
             }
+        } catch (Throwable ignored) {}
+
+        // コンソールには常に出す（サーバーログ）
+        try {
+            OrePickerLog.debug("Finalized for " + uuid + " -> Broke " + cnt + " " + id);
         } catch (Throwable ignored) {}
     }
 
@@ -67,11 +78,13 @@ public final class VeinMineTracker {
      */
     public static void handleTimeouts(Function<UUID, ServerPlayerEntity> playerLookup) {
         long now = System.currentTimeMillis();
+        // 固有のキー配列を作る（ConcurrentHashMap を回しているため CME を避ける）
         UUID[] keys = LAST_ACTION_MS.keySet().toArray(new UUID[0]);
         for (UUID uuid : keys) {
             Long last = LAST_ACTION_MS.get(uuid);
             if (last == null) continue;
             if (now - last >= INACTIVITY_TIMEOUT_MS) {
+                // finalize
                 Integer cnt = COUNTS.remove(uuid);
                 String id = FIRST_ID.remove(uuid);
                 LAST_ACTION_MS.remove(uuid);
@@ -80,12 +93,23 @@ public final class VeinMineTracker {
 
                 ServerPlayerEntity player = playerLookup.apply(uuid);
                 if (player != null) {
+                    // チャット出力は設定依存にする
+                    boolean allowChat = false;
                     try {
-                        boolean logChat = false;
-                        if (ConfigManager.INSTANCE != null) logChat = ConfigManager.INSTANCE.logToChat;
-                        if (logChat) {
+                        if (ConfigManager.INSTANCE != null) {
+                            allowChat = ConfigManager.INSTANCE.logToChat || ConfigManager.INSTANCE.debug;
+                        }
+                    } catch (Throwable ignored) {}
+
+                    try {
+                        if (allowChat) {
                             player.sendMessage(Text.literal("Broke " + cnt + " " + id), false);
                         }
+                    } catch (Throwable ignored) {}
+
+                    // コンソールには常に出す（デバッグ用）
+                    try {
+                        OrePickerLog.debug("Timeout finalize for " + uuid + ": Broke " + cnt + " " + id);
                     } catch (Throwable ignored) {}
                 }
             }

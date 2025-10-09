@@ -3,12 +3,10 @@ package net.misemise.ore_picker;
 import net.misemise.ore_picker.config.ConfigManager;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.Identifier;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Block;
 import net.minecraft.item.ItemStack;
 import net.minecraft.block.Blocks;
-import net.minecraft.text.Text;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Constructor;
@@ -205,13 +203,7 @@ public final class VeinMiner {
         if (broken > 0) {
             try {
                 String blockId = originalState.getBlock().toString();
-                // -----------------------
-                // ここではチャット通知は行わない（通知は VeinMineTracker 側で一元化）
-                // コンソールログのみ出す
-                try {
-                    System.out.println("[VeinMiner] Vein broken: " + broken + " " + blockId);
-                } catch (Throwable ignored) {}
-                // -----------------------
+                OrePickerLog.debug("Vein broken: " + broken + " " + blockId);
             } catch (Throwable ignored) {}
         }
 
