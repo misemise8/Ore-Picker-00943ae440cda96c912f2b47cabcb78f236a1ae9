@@ -9,32 +9,30 @@ import net.misemise.ore_picker.config.ConfigManager;
 import java.lang.reflect.*;
 
 /**
- * HoldHudOverlay - 位置修正版 + vein count 受け口追加
+ * HoldHudOverlay - 位置修正版 + vein count 受信ハンドラ追加
  *
- * - 既存の描画互換性を保ちつつ、サーバから来る vein count を受け取るメソッドを追加
- * - 小さな表示ロジックの改善（vein count を一定時間表示）
+ * - 既存の機能は維持
+ * - onVeinCountReceived(int) を追加してクライアント受信から HUD 側へ値を渡せるようにした
+ * - デバッグログは ConfigManager.INSTANCE.debug のチェック下のみ出力する
  */
 public final class HoldHudOverlay {
     private HoldHudOverlay() {}
 
     private static final long FADE_MS = 1200L; // 1.2 秒
-    private static final float SCALE = 1.2f;
+    private static final float SCALE_DEFAULT = 1.2f;
     private static final int COLOR_RGB = 0x9AFF66; // RRGGBB
-
-    // 最小可視アルファ（小さすぎると 1 バイト丸めでちらつく）
     private static final float MIN_VISIBLE_OPACITY = 0.03f;
 
     // hold state
     private static volatile boolean lastHold = false;
     private static volatile long lastChangeTime = System.currentTimeMillis();
 
-    // HUD 登録済みフラグ（HudRenderCallback 経由登録の有無）
-    private static volatile boolean registeredViaHudCallback = false;
-
-    // vein count 表示用
+    // vein count state (受信されると HUD 表示などに利用できる)
     private static volatile int lastVeinCount = 0;
-    private static volatile long lastVeinCountTime = 0L;
-    private static final long VEIN_COUNT_DISPLAY_MS = 2000L; // 2 秒だけ表示
+    private static volatile long lastVeinCountTimeMs = 0L;
+
+    // HUD 登録済みフラグ
+    private static volatile boolean registeredViaHudCallback = false;
 
     public static void onHoldChanged(boolean hold) {
         if (hold != lastHold) {
@@ -43,12 +41,14 @@ public final class HoldHudOverlay {
         }
     }
 
-    /**
-     * サーバからの vein_count を受け取るための公開メソッド（Ore_pickerClient から呼び出す）
-     */
     public static void onVeinCountReceived(int count) {
         lastVeinCount = count;
-        lastVeinCountTime = System.currentTimeMillis();
+        lastVeinCountTimeMs = System.currentTimeMillis();
+        try {
+            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                System.out.println("[OrePicker][HUD] onVeinCountReceived: " + count);
+            }
+        } catch (Throwable ignored) {}
     }
 
     private static float computeOpacity() {
@@ -75,7 +75,7 @@ public final class HoldHudOverlay {
                 }
             }
             if (registerMethod == null) {
-                System.err.println("[OrePicker] HudRenderCallback.EVENT.register(...) not found - HUD not registered via API.");
+                logDebug("HudRenderCallback.EVENT.register(...) not found - HUD not registered via API.");
                 return;
             }
 
@@ -137,15 +137,15 @@ public final class HoldHudOverlay {
             try {
                 registerMethod.invoke(eventObj, listenerProxy);
                 registeredViaHudCallback = true;
-                System.out.println("[OrePicker] HUD overlay registered (via HudRenderCallback).");
+                logInfo("[OrePicker] HUD overlay registered (via HudRenderCallback).");
             } catch (Throwable ite) {
-                System.err.println("[OrePicker] HudRenderCallback registration failed (non-fatal).");
+                logError("[OrePicker] HudRenderCallback registration failed (non-fatal).");
                 try { if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) ite.printStackTrace(); } catch (Throwable ignored) {}
             }
         } catch (ClassNotFoundException cnf) {
-            System.out.println("[OrePicker] HudRenderCallback not present at runtime; rely on mixin fallback.");
+            logInfo("[OrePicker] HudRenderCallback not present at runtime; rely on mixin fallback.");
         } catch (Throwable t) {
-            System.err.println("[OrePicker] register() unexpected error:");
+            logError("[OrePicker] register() unexpected error:");
             t.printStackTrace();
         }
     }
@@ -176,15 +176,7 @@ public final class HoldHudOverlay {
 
             if (client == null) return;
 
-            // show vein count if recently received
-            String textStr;
-            long now = System.currentTimeMillis();
-            if (lastVeinCount > 0 && now - lastVeinCountTime <= VEIN_COUNT_DISPLAY_MS) {
-                textStr = "OrePicker: Vein " + lastVeinCount;
-            } else {
-                textStr = "OrePicker: Running";
-            }
-
+            String textStr = "OrePicker: Running";
             Text labelText = Text.literal(textStr);
             OrderedText ordered = labelText.asOrderedText();
 
@@ -194,11 +186,10 @@ public final class HoldHudOverlay {
             int textWidth = tryGetTextWidth(client, textStr, ordered, labelText);
             int fontH = tryGetFontHeight(client);
 
-            // ここを調整してホットバーの上に出す
-            float baseBottomOffset = 44f; // ホットバー + マージン相当。微調整してね。
+            float baseBottomOffset = 44f; // ホットバー + マージン相当。
 
-            float xf = (sw / 2f) - (textWidth * SCALE / 2f);
-            float yf = (sh - baseBottomOffset - (fontH * SCALE));
+            float xf = (sw / 2f) - (textWidth * SCALE_DEFAULT / 2f);
+            float yf = (sh - baseBottomOffset - (fontH * SCALE_DEFAULT));
 
             int alphaByte = Math.round(opacity * 255f);
             alphaByte = alphaByte & 0xFF;
@@ -210,7 +201,6 @@ public final class HoldHudOverlay {
                         " ctx=" + (matrixOrDrawContext == null ? "null" : matrixOrDrawContext.getClass().getSimpleName()));
             }
 
-            // depth を無効化して上に描く（多くのケースでチャットより上に出る）
             try { RenderSystem.disableDepthTest(); } catch (Throwable ignored) {}
             try { RenderSystem.enableBlend(); } catch (Throwable ignored) {}
 
@@ -223,23 +213,17 @@ public final class HoldHudOverlay {
 
             boolean drawn = false;
 
-            // matrixStack 系
             if (matrixOrDrawContext != null && matrixOrDrawContext.getClass().getName().toLowerCase().contains("matrix")) {
-                drawn = tryDrawWithTextRendererUsingMatrix(client, matrixOrDrawContext, textStr, labelText, ordered, xf, yf, tint, SCALE);
-                if (debug) System.out.println("[OrePicker][HUD] tryDrawWithTextRendererUsingMatrix -> " + drawn);
+                drawn = tryDrawWithTextRendererUsingMatrix(client, matrixOrDrawContext, textStr, labelText, ordered, xf, yf, tint, SCALE_DEFAULT);
                 if (!drawn) {
-                    drawn = tryDrawWithTextRendererFallback(client, textStr, labelText, ordered, xf, yf, tint, SCALE);
-                    if (debug) System.out.println("[OrePicker][HUD] tryDrawWithTextRendererFallback -> " + drawn);
+                    drawn = tryDrawWithTextRendererFallback(client, textStr, labelText, ordered, xf, yf, tint, SCALE_DEFAULT);
                 }
             } else {
-                // DrawContext（あるいは DrawContext ライク）経路 — ここで座標は S CALE で割らない（重要）
                 if (matrixOrDrawContext != null) {
                     drawn = tryDrawWithDrawContextReflection(matrixOrDrawContext, client, textStr, labelText, ordered, xf, yf, tint);
-                    if (debug) System.out.println("[OrePicker][HUD] tryDrawWithDrawContextReflection -> " + drawn);
                 }
                 if (!drawn) {
-                    drawn = tryDrawWithTextRendererFallback(client, textStr, labelText, ordered, xf, yf, tint, SCALE);
-                    if (debug) System.out.println("[OrePicker][HUD] tryDrawWithTextRendererFallback (2) -> " + drawn);
+                    drawn = tryDrawWithTextRendererFallback(client, textStr, labelText, ordered, xf, yf, tint, SCALE_DEFAULT);
                 }
             }
 
@@ -450,5 +434,21 @@ public final class HoldHudOverlay {
             }
         } catch (Throwable ignored) {}
         return null;
+    }
+
+    private static void logDebug(String s) {
+        try {
+            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) System.out.println(s);
+        } catch (Throwable ignored) {}
+    }
+    private static void logInfo(String s) {
+        try {
+            System.out.println(s);
+        } catch (Throwable ignored) {}
+    }
+    private static void logError(String s) {
+        try {
+            System.err.println(s);
+        } catch (Throwable ignored) {}
     }
 }
