@@ -3,6 +3,7 @@ package net.misemise.ore_picker.client.rendering;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.misemise.ore_picker.client.Ore_pickerClient;
+import net.misemise.ore_picker.config.ConfigManager;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.*;
 import net.minecraft.client.render.VertexConsumerProvider.Immediate;
@@ -11,15 +12,20 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.InvocationTargetException;
 import java.util.Set;
 
 /**
- * OutlineRenderer - 互換性重視版（チェイン呼び出しを避け、すべて反射で試行）
+ * OutlineRenderer - カメラ座標系補正 + 終端呼び出し強化版
  */
 public final class OutlineRenderer {
     private OutlineRenderer() {}
+
+    // 太さ制御（増やすと太くなる）
+    private static final int THICKNESS_STEPS = 5;
+    private static final float THICKNESS_OFFSET = 0.0045f;
 
     public static void register() {
         try {
@@ -28,8 +34,7 @@ public final class OutlineRenderer {
                     render(context);
                 } catch (Throwable t) {
                     try {
-                        if (net.misemise.ore_picker.config.ConfigManager.INSTANCE != null &&
-                                net.misemise.ore_picker.config.ConfigManager.INSTANCE.debug) t.printStackTrace();
+                        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) t.printStackTrace();
                     } catch (Throwable ignored) {}
                 }
             });
@@ -56,24 +61,33 @@ public final class OutlineRenderer {
         Set<BlockPos> set = Ore_pickerClient.selectedBlocks;
         if (set == null || set.isEmpty()) return;
 
-        float r = 0.6f, g = 1.0f, b = 0.4f, a = 1.0f;
+        float r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
         RenderLayer linesLayer = RenderLayer.getLines();
 
         VertexConsumer vc;
         try {
             vc = provider.getBuffer(linesLayer);
         } catch (Throwable t) {
-            try { if (net.misemise.ore_picker.config.ConfigManager.INSTANCE != null && net.misemise.ore_picker.config.ConfigManager.INSTANCE.debug) t.printStackTrace(); } catch (Throwable ignored) {}
+            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) t.printStackTrace();
             return;
         }
 
-        // まず vanilla の helper を反射で探す
         Method reflectiveDrawBox = findWorldRendererDrawBox();
-
-        // MatrixStack から得られる行列オブジェクトを可能なら取得しておく（org.joml.Matrix4f / com.mojang.math.Matrix4f 等）
         Object matrixObj = obtainMatrixFromMatrixStack(matrices);
 
+        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+            System.out.println("[OrePicker][OutlineRenderer DEBUG] matrixObj=" + (matrixObj == null ? "null" : matrixObj.getClass().getName())
+                    + " reflectiveDrawBox=" + (reflectiveDrawBox == null ? "null" : reflectiveDrawBox.getName())
+                    + " vc=" + (vc == null ? "null" : vc.getClass().getName())
+                    + " selected=" + set.size()
+                    + " camPos=" + camPos);
+        }
+
         synchronized (set) {
+            float camX = (float) camPos.x;
+            float camY = (float) camPos.y;
+            float camZ = (float) camPos.z;
+
             for (BlockPos bp : set) {
                 if (bp == null) continue;
 
@@ -86,12 +100,14 @@ public final class OutlineRenderer {
                     try {
                         reflectiveDrawBox.invoke(null, matrices, vc, rel, r, g, b, a);
                         drawn = true;
-                    } catch (IllegalAccessException | InvocationTargetException ignore) {
-                        // fallthrough: 手動描画にフォールバック
-                        drawn = false;
+                        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug)
+                            System.out.println("[OrePicker][OutlineRenderer DEBUG] drawBox invoked reflectively for " + bp);
                     } catch (Throwable t) {
                         drawn = false;
-                        try { if (net.misemise.ore_picker.config.ConfigManager.INSTANCE != null && net.misemise.ore_picker.config.ConfigManager.INSTANCE.debug) t.printStackTrace(); } catch (Throwable ignored) {}
+                        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                            System.err.println("[OrePicker][OutlineRenderer DEBUG] reflective drawBox failed:");
+                            t.printStackTrace();
+                        }
                     }
                 }
 
@@ -99,21 +115,46 @@ public final class OutlineRenderer {
                     float minX = (float) rel.minX, minY = (float) rel.minY, minZ = (float) rel.minZ;
                     float maxX = (float) rel.maxX, maxY = (float) rel.maxY, maxZ = (float) rel.maxZ;
 
-                    // 12 辺をそれぞれ描画（反射で頂点APIを試行）
-                    emitLineRobust(vc, matrixObj, minX, minY, minZ, maxX, minY, minZ, r, g, b, a);
-                    emitLineRobust(vc, matrixObj, minX, maxY, minZ, maxX, maxY, minZ, r, g, b, a);
-                    emitLineRobust(vc, matrixObj, minX, minY, maxZ, maxX, minY, maxZ, r, g, b, a);
-                    emitLineRobust(vc, matrixObj, minX, maxY, maxZ, maxX, maxY, maxZ, r, g, b, a);
+                    float[][] edges = new float[][] {
+                            { minX, minY, minZ, maxX, minY, minZ },
+                            { minX, maxY, minZ, maxX, maxY, minZ },
+                            { minX, minY, maxZ, maxX, minY, maxZ },
+                            { minX, maxY, maxZ, maxX, maxY, maxZ },
 
-                    emitLineRobust(vc, matrixObj, minX, minY, minZ, minX, maxY, minZ, r, g, b, a);
-                    emitLineRobust(vc, matrixObj, maxX, minY, minZ, maxX, maxY, minZ, r, g, b, a);
-                    emitLineRobust(vc, matrixObj, minX, minY, maxZ, minX, maxY, maxZ, r, g, b, a);
-                    emitLineRobust(vc, matrixObj, maxX, minY, maxZ, maxX, maxY, maxZ, r, g, b, a);
+                            { minX, minY, minZ, minX, maxY, minZ },
+                            { maxX, minY, minZ, maxX, maxY, minZ },
+                            { minX, minY, maxZ, minX, maxY, maxZ },
+                            { maxX, minY, maxZ, maxX, maxY, maxZ },
 
-                    emitLineRobust(vc, matrixObj, minX, minY, minZ, minX, minY, maxZ, r, g, b, a);
-                    emitLineRobust(vc, matrixObj, maxX, minY, minZ, maxX, minY, maxZ, r, g, b, a);
-                    emitLineRobust(vc, matrixObj, minX, maxY, minZ, minX, maxY, maxZ, r, g, b, a);
-                    emitLineRobust(vc, matrixObj, maxX, maxY, minZ, maxX, maxY, maxZ, r, g, b, a);
+                            { minX, minY, minZ, minX, minY, maxZ },
+                            { maxX, minY, minZ, maxX, minY, maxZ },
+                            { minX, maxY, minZ, minX, maxY, maxZ },
+                            { maxX, maxY, minZ, maxX, maxY, maxZ }
+                    };
+
+                    for (float[] e : edges) {
+                        float x1 = e[0], y1 = e[1], z1 = e[2];
+                        float x2 = e[3], y2 = e[4], z2 = e[5];
+
+                        // カメラ相対化（重要）：world -> view-relative coords
+                        float rx1 = x1 - camX, ry1 = y1 - camY, rz1 = z1 - camZ;
+                        float rx2 = x2 - camX, ry2 = y2 - camY, rz2 = z2 - camZ;
+
+                        // 太くするために複数オフセットで重ねる
+                        for (int step = 0; step < THICKNESS_STEPS; step++) {
+                            float ox = 0f, oy = 0f, oz = 0f;
+                            if (step > 0) {
+                                float s = (step % 2 == 0) ? 1f : -1f;
+                                ox = THICKNESS_OFFSET * s * step;
+                                oy = THICKNESS_OFFSET * s * ((step+1)%2);
+                                oz = THICKNESS_OFFSET * s * ((step+2)%2);
+                            }
+                            emitLineRobust(vc, matrixObj,
+                                    rx1 + ox, ry1 + oy, rz1 + oz,
+                                    rx2 + ox, ry2 + oy, rz2 + oz,
+                                    r, g, b, a);
+                        }
+                    }
                 }
             }
         }
@@ -137,145 +178,308 @@ public final class OutlineRenderer {
         return null;
     }
 
-    // MatrixStack.peek() から行列オブジェクトを取り出す。見つかれば返す（型はランタイムに任せる）
     private static Object obtainMatrixFromMatrixStack(MatrixStack matrices) {
         try {
             Object entry = matrices.peek();
             if (entry == null) return null;
-            String[] candidates = new String[] { "getModel", "getPositionMatrix", "getMatrix", "get", "peek" };
+            String[] candidates = new String[] { "getModel", "getPositionMatrix", "getMatrix", "get", "peek", "method_23761", "method_23760" };
             for (String name : candidates) {
                 try {
                     Method gm = entry.getClass().getMethod(name);
                     Object mat = gm.invoke(entry);
                     if (mat != null) return mat;
-                } catch (NoSuchMethodException nsme) {
-                    // 次へ
-                }
+                } catch (NoSuchMethodException nsme) { }
             }
         } catch (Throwable ignored) {}
         return null;
     }
 
     /**
-     * 頂点発行を反射で頑張る関数。
-     * - まず vertex(matrixClass, float,float,float) を試し、返り値に color(...) と終端メソッド(next/endVertex/emit)を呼ぶ。
-     * - 次に vertex(float,float,float) を試して同様に color/終端。
-     * - 次に vertex に大量引数 (x,y,z,r,g,b,a) のようなバリアントを探して直接呼ぶ。
-     * - 何も見つからなければ安全に握りつぶす（描画不可）。
+     * 頂点発行の互換的実装。
+     * - BufferBuilder 実装を特別扱いして、vertex(matrix,..)->color(int,..)->normal(...) -> finalize を確実に行う。
+     * - それ以外は従来の反射フォールバックを試行。
      */
     private static void emitLineRobust(VertexConsumer vc, Object matrixObj,
                                        float x1, float y1, float z1,
                                        float x2, float y2, float z2,
                                        float r, float g, float b, float a) {
-        // Helper: try chain-style: invoke vertex(...) -> returnedObj -> color(...) -> finalize()
+        if (vc == null) return;
+        Class<?> cls = vc.getClass();
+
+        // まず BufferBuilder 系の具体実装を特別扱い（ログでも BufferBuilder が来ているようなので）
+        String clsName = cls.getName().toLowerCase();
+        boolean isBufferBuilderLike = clsName.contains("bufferbuilder") || clsName.contains("bufferbuilder$") || clsName.contains("bufferbuilder");
+
+        if (isBufferBuilderLike) {
+            if (tryEmitOnBufferBuilder(vc, matrixObj, x1,y1,z1, x2,y2,z2, r,g,b,a)) return;
+        }
+
+        // 汎用反射ルート（matrix付き vertex を優先）
+        boolean ok = false;
         try {
-            // 1) vertex(matrix, x,y,z)
             if (matrixObj != null) {
-                try {
-                    Method v = findMethod(vc.getClass(), "vertex", matrixObj.getClass(), float.class, float.class, float.class);
-                    if (v != null) {
-                        Object ret1 = v.invoke(vc, matrixObj, x1, y1, z1);
-                        if (tryColorAndFinalize(ret1, r, g, b, a)) {
-                            Object ret2 = v.invoke(vc, matrixObj, x2, y2, z2);
-                            tryColorAndFinalize(ret2, r, g, b, a);
-                            return;
-                        }
-                    }
-                } catch (Throwable ignored) {}
-            }
-
-            // 2) vertex(x,y,z)
-            try {
-                Method v2 = findMethod(vc.getClass(), "vertex", float.class, float.class, float.class);
-                if (v2 != null) {
-                    Object ret1 = v2.invoke(vc, x1, y1, z1);
-                    if (tryColorAndFinalize(ret1, r, g, b, a)) {
-                        Object ret2 = v2.invoke(vc, x2, y2, z2);
-                        tryColorAndFinalize(ret2, r, g, b, a);
-                        return;
-                    }
-                }
-            } catch (Throwable ignored) {}
-
-            // 3) direct multi-arg variant: look for vertex(double/float x3.. and color args)
-            try {
-                for (Method m : vc.getClass().getMethods()) {
-                    if (!m.getName().equals("vertex")) continue;
+                for (Method m : cls.getMethods()) {
                     Class<?>[] pts = m.getParameterTypes();
-                    // candidate: vertex(float x, float y, float z, float r, float g, float b, float a)
-                    if (pts.length >= 7) {
-                        boolean ok1 = isNumeric(pts[0]) && isNumeric(pts[1]) && isNumeric(pts[2]) &&
-                                (isNumeric(pts[3]) || pts[3] == int.class || pts[3] == Integer.class);
-                        if (ok1) {
-                            // try to invoke with float/double appropriately
-                            Object[] args1 = buildNumericArgs(pts, x1, y1, z1, r, g, b, a);
-                            Object[] args2 = buildNumericArgs(pts, x2, y2, z2, r, g, b, a);
-                            try {
-                                m.invoke(vc, args1);
-                                m.invoke(vc, args2);
-                                return;
-                            } catch (Throwable ignored) {}
-                        }
+                    if (pts.length == 4 && pts[0].isAssignableFrom(matrixObj.getClass()) && isNumeric(pts[1]) && isNumeric(pts[2]) && isNumeric(pts[3])) {
+                        String mn = m.getName().toLowerCase();
+                        if (!(mn.contains("vertex") || mn.contains("pos") || mn.contains("method_22918"))) continue;
+                        try {
+                            Object ret1 = m.invoke(vc, matrixObj, x1, y1, z1);
+                            tryInvokeColorOn(ret1 != null ? ret1 : vc, r, g, b, a);
+                            tryFinalizeOn(ret1 != null ? ret1 : vc);
+
+                            Object ret2 = m.invoke(vc, matrixObj, x2, y2, z2);
+                            tryInvokeColorOn(ret2 != null ? ret2 : vc, r, g, b, a);
+                            tryFinalizeOn(ret2 != null ? ret2 : vc);
+
+                            ok = true;
+                            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug)
+                                System.out.println("[OrePicker][OutlineRenderer DEBUG] emitted via matrix-sig method " + m + " on " + cls.getName());
+                            break;
+                        } catch (Throwable ignored) {}
                     }
                 }
-            } catch (Throwable ignored) {}
-
+            }
         } catch (Throwable ignored) {}
 
-        // 最終フォールバック: 何もしない（描画失敗）。デバッグ出力は別の箇所で行ってください。
-    }
+        if (ok) return;
 
-    // try to call color(...) on returned object and then call finalize method like next()/endVertex()/emit()
-    private static boolean tryColorAndFinalize(Object returnedObj, float r, float g, float b, float a) {
-        if (returnedObj == null) return false;
+        // 次に 3-arg numeric の vertex-like を探す（名前フィルタ付き）
         try {
-            // try color(float,float,float,float)
-            Method color = findMethod(returnedObj.getClass(), "color", float.class, float.class, float.class, float.class);
-            if (color != null) {
-                Object afterColor = color.invoke(returnedObj, r, g, b, a);
-                // try finalizer names
-                String[] finalNames = new String[] {"next", "endVertex", "emit", "nextVertex"};
-                for (String fname : finalNames) {
+            for (Method m : cls.getMethods()) {
+                Class<?>[] pts = m.getParameterTypes();
+                if (pts.length == 3 && isNumeric(pts[0]) && isNumeric(pts[1]) && isNumeric(pts[2])) {
+                    String mn = m.getName().toLowerCase();
+                    if (!(mn.contains("vertex") || mn.contains("pos") || mn.contains("put") || mn.contains("method_22918"))) continue;
                     try {
-                        Method finalM = findMethod(afterColor.getClass(), fname);
-                        if (finalM != null) {
-                            finalM.invoke(afterColor);
-                            return true;
-                        }
+                        Object ret1 = m.invoke(vc, x1, y1, z1);
+                        tryInvokeColorOn(ret1 != null ? ret1 : vc, r, g, b, a);
+                        tryFinalizeOn(ret1 != null ? ret1 : vc);
+
+                        Object ret2 = m.invoke(vc, x2, y2, z2);
+                        tryInvokeColorOn(ret2 != null ? ret2 : vc, r, g, b, a);
+                        tryFinalizeOn(ret2 != null ? ret2 : vc);
+
+                        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug)
+                            System.out.println("[OrePicker][OutlineRenderer DEBUG] emitted via 3-arg vertex-like method " + m + " on " + cls.getName());
+                        return;
                     } catch (Throwable ignored) {}
                 }
-                // if no finalizer found, maybe chaining not required; assume success
-                return true;
             }
+        } catch (Throwable ignored) {}
+
+        // multi-arg direct
+        try {
+            for (Method m : cls.getMethods()) {
+                String mn = m.getName().toLowerCase();
+                Class<?>[] pts = m.getParameterTypes();
+                if (pts.length >= 3 && isNumeric(pts[0]) && isNumeric(pts[1]) && isNumeric(pts[2])) {
+                    if (!mn.contains("vertex") && !mn.contains("pos") && !mn.contains("put") && !mn.contains("set")) continue;
+                    try {
+                        Object[] args1 = buildNumericArgs(pts, x1,y1,z1, r,g,b,a);
+                        Object[] args2 = buildNumericArgs(pts, x2,y2,z2, r,g,b,a);
+                        m.invoke(vc, args1);
+                        m.invoke(vc, args2);
+                        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug)
+                            System.out.println("[OrePicker][OutlineRenderer DEBUG] emitted via multi-arg " + m + " on " + cls.getName());
+                        return;
+                    } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+            System.out.println("[OrePicker][OutlineRenderer DEBUG] emit failed for vc=" + cls.getName());
+        }
+    }
+
+    // BufferBuilder系を見つけたらこちらで直接順序を守って呼ぶ（反射だが候補絞り込み強め）
+    private static boolean tryEmitOnBufferBuilder(VertexConsumer vc, Object matrixObj,
+                                                  float x1, float y1, float z1,
+                                                  float x2, float y2, float z2,
+                                                  float r, float g, float b, float a) {
+        Class<?> cls = vc.getClass();
+        try {
+            Method vertexMatrix = null;
+            Method vertex3 = null;
+            Method colorInt = null;
+            Method colorFloat = null;
+            Method normalFloat = null;
+            Method finalizeMethod = null;
+
+            for (Method m : cls.getMethods()) {
+                String mn = m.getName().toLowerCase();
+                Class<?>[] pts = m.getParameterTypes();
+                if (pts.length == 4 && matrixObj != null && pts[0].isAssignableFrom(matrixObj.getClass()) && isNumeric(pts[1]) && isNumeric(pts[2]) && isNumeric(pts[3])) {
+                    if (mn.contains("vertex") || mn.contains("method_22918") || mn.contains("method_22917")) vertexMatrix = m;
+                }
+                if (pts.length == 3 && isNumeric(pts[0]) && isNumeric(pts[1]) && isNumeric(pts[2]) && (mn.contains("vertex") || mn.contains("method_22918"))) {
+                    vertex3 = m;
+                }
+                if (pts.length == 4 && (pts[0] == int.class || pts[0] == Integer.class) && (mn.contains("color") || mn.contains("method_1336") || mn.contains("method_22915"))) {
+                    colorInt = m;
+                }
+                if (pts.length == 4 && (isNumeric(pts[0]) && isNumeric(pts[1]) && isNumeric(pts[2]) && isNumeric(pts[3])) && (mn.contains("color") || mn.contains("method_22915"))) {
+                    colorFloat = m;
+                }
+                if (pts.length == 3 && isNumeric(pts[0]) && isNumeric(pts[1]) && isNumeric(pts[2]) && (mn.contains("normal") || mn.contains("method_60831"))) {
+                    normalFloat = m;
+                }
+                if ((mn.equals("next") || mn.equals("endvertex") || mn.equals("emit") || mn.equals("nextvertex") ||
+                        mn.contains("method_22922") || mn.contains("method_22923"))) {
+                    if (m.getParameterCount() == 0) finalizeMethod = m;
+                }
+            }
+
+            // try matrix variant first
+            if (vertexMatrix != null) {
+                try {
+                    Object ret1 = vertexMatrix.invoke(vc, matrixObj, x1, y1, z1);
+                    if (colorInt != null) {
+                        colorInt.invoke(vc, (int)(r*255f), (int)(g*255f), (int)(b*255f), (int)(a*255f));
+                        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug)
+                            System.out.println("[OrePicker][OutlineRenderer DEBUG] color invoked via " + colorInt + " on " + cls.getName());
+                    } else if (colorFloat != null) {
+                        colorFloat.invoke(vc, r, g, b, a);
+                        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug)
+                            System.out.println("[OrePicker][OutlineRenderer DEBUG] color(float) invoked via " + colorFloat + " on " + cls.getName());
+                    }
+
+                    if (normalFloat != null) {
+                        // compute normal from edge direction
+                        float nx = x2 - x1, ny = y2 - y1, nz = z2 - z1;
+                        float mag = (float)Math.sqrt(nx*nx + ny*ny + nz*nz);
+                        if (mag != 0) { nx/=mag; ny/=mag; nz/=mag; }
+                        try { normalFloat.invoke(vc, nx, ny, nz); } catch (Throwable ignored) {}
+                    }
+
+                    // finalize if we can
+                    if (finalizeMethod != null) {
+                        try { finalizeMethod.invoke(vc); } catch (Throwable ignored) {}
+                    }
+
+                    // second vertex
+                    Object ret2 = vertexMatrix.invoke(vc, matrixObj, x2, y2, z2);
+                    if (colorInt != null) {
+                        colorInt.invoke(vc, (int)(r*255f), (int)(g*255f), (int)(b*255f), (int)(a*255f));
+                    } else if (colorFloat != null) {
+                        colorFloat.invoke(vc, r, g, b, a);
+                    }
+                    if (normalFloat != null) {
+                        float nx = x2 - x1, ny = y2 - y1, nz = z2 - z1;
+                        float mag = (float)Math.sqrt(nx*nx + ny*ny + nz*nz);
+                        if (mag != 0) { nx/=mag; ny/=mag; nz/=mag; }
+                        try { normalFloat.invoke(vc, nx, ny, nz); } catch (Throwable ignored) {}
+                    }
+                    if (finalizeMethod != null) {
+                        try { finalizeMethod.invoke(vc); } catch (Throwable ignored) {}
+                    }
+
+                    if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug)
+                        System.out.println("[OrePicker][OutlineRenderer DEBUG] emitted via matrix-sig method " + vertexMatrix + " on " + cls.getName());
+                    return true;
+                } catch (Throwable t) {
+                    if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                        System.err.println("[OrePicker][OutlineRenderer DEBUG] tryEmitOnBufferBuilder(matrix) failed:");
+                        t.printStackTrace();
+                    }
+                }
+            }
+
+            // fallback: 3-arg vertex
+            if (vertex3 != null) {
+                try {
+                    vertex3.invoke(vc, x1, y1, z1);
+                    if (colorInt != null) colorInt.invoke(vc, (int)(r*255f), (int)(g*255f), (int)(b*255f), (int)(a*255f));
+                    else if (colorFloat != null) colorFloat.invoke(vc, r,g,b,a);
+                    if (normalFloat != null) {
+                        float nx = x2 - x1, ny = y2 - y1, nz = z2 - z1;
+                        float mag = (float)Math.sqrt(nx*nx + ny*ny + nz*nz);
+                        if (mag != 0) { nx/=mag; ny/=mag; nz/=mag; }
+                        try { normalFloat.invoke(vc, nx, ny, nz); } catch (Throwable ignored) {}
+                    }
+                    if (finalizeMethod != null) try { finalizeMethod.invoke(vc); } catch (Throwable ignored) {}
+
+                    vertex3.invoke(vc, x2, y2, z2);
+                    if (colorInt != null) colorInt.invoke(vc, (int)(r*255f), (int)(g*255f), (int)(b*255f), (int)(a*255f));
+                    else if (colorFloat != null) colorFloat.invoke(vc, r,g,b,a);
+                    if (normalFloat != null) {
+                        float nx = x2 - x1, ny = y2 - y1, nz = z2 - z1;
+                        float mag = (float)Math.sqrt(nx*nx + ny*ny + nz*nz);
+                        if (mag != 0) { nx/=mag; ny/=mag; nz/=mag; }
+                        try { normalFloat.invoke(vc, nx, ny, nz); } catch (Throwable ignored) {}
+                    }
+                    if (finalizeMethod != null) try { finalizeMethod.invoke(vc); } catch (Throwable ignored) {}
+
+                    if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug)
+                        System.out.println("[OrePicker][OutlineRenderer DEBUG] emitted via 3-arg BufferBuilder vertex on " + cls.getName());
+                    return true;
+                } catch (Throwable t) {
+                    if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
+                        System.err.println("[OrePicker][OutlineRenderer DEBUG] tryEmitOnBufferBuilder(3-arg) failed:");
+                        t.printStackTrace();
+                    }
+                }
+            }
+
         } catch (Throwable ignored) {}
 
         return false;
     }
 
-    // find method by name and parameter types, tolerant to subclasses (returns first that matches assignability)
-    private static Method findMethod(Class<?> cls, String name, Class<?>... params) {
-        for (Method m : cls.getMethods()) {
-            if (!m.getName().equals(name)) continue;
-            Class<?>[] pts = m.getParameterTypes();
-            if (pts.length != params.length) continue;
-            boolean ok = true;
-            for (int i = 0; i < pts.length; i++) {
-                if (params[i] == null) continue;
-                if (!primitiveOrAssignable(pts[i], params[i])) { ok = false; break; }
+    private static boolean tryInvokeColorOn(Object target, float r, float g, float b, float a) {
+        if (target == null) return false;
+        Class<?> c = target.getClass();
+        try {
+            // try int,int,int,int
+            for (Method m : c.getMethods()) {
+                String mn = m.getName().toLowerCase();
+                Class<?>[] pts = m.getParameterTypes();
+                if (pts.length == 4 && (pts[0] == int.class || pts[0] == Integer.class)) {
+                    if (!mn.contains("color") && !mn.contains("method_1336") && !mn.contains("method_22915")) continue;
+                    try {
+                        m.invoke(target, (int)(r*255f), (int)(g*255f), (int)(b*255f), (int)(a*255f));
+                        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug)
+                            System.out.println("[OrePicker][OutlineRenderer DEBUG] color invoked via " + m + " on " + c.getName());
+                        return true;
+                    } catch (Throwable ignored) {}
+                }
             }
-            if (ok) return m;
-        }
-        return null;
+            // try float,float,float,float
+            for (Method m : c.getMethods()) {
+                String mn = m.getName().toLowerCase();
+                Class<?>[] pts = m.getParameterTypes();
+                if (pts.length == 4 && isNumeric(pts[0]) && isNumeric(pts[1]) && isNumeric(pts[2]) && isNumeric(pts[3])) {
+                    if (!mn.contains("color") && !mn.contains("method_22915")) continue;
+                    try {
+                        m.invoke(target, r, g, b, a);
+                        if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug)
+                            System.out.println("[OrePicker][OutlineRenderer DEBUG] color(float) invoked via " + m + " on " + c.getName());
+                        return true;
+                    } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
-    private static boolean primitiveOrAssignable(Class<?> target, Class<?> src) {
-        if (target.isAssignableFrom(src)) return true;
-        if (target.isPrimitive()) {
-            // common primitive wrappers
-            if (target == float.class && (src == Float.class)) return true;
-            if (target == double.class && (src == Double.class)) return true;
-            if (target == int.class && (src == Integer.class)) return true;
-            if (target == long.class && (src == Long.class)) return true;
+    private static boolean tryFinalizeOn(Object obj) {
+        if (obj == null) return false;
+        String[] names = new String[] {"next", "endvertex", "endVertex", "emit", "nextvertex", "method_22922", "method_22923", "method_60831"};
+        for (String n : names) {
+            try {
+                for (Method m : obj.getClass().getMethods()) {
+                    if (!m.getName().equalsIgnoreCase(n)) continue;
+                    if (m.getParameterCount() == 0) {
+                        try {
+                            m.invoke(obj);
+                            if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug)
+                                System.out.println("[OrePicker][OutlineRenderer DEBUG] finalize method invoked: " + m.getName() + " on " + obj.getClass().getName());
+                            return true;
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            } catch (Throwable ignored) {}
         }
         return false;
     }
@@ -285,11 +489,9 @@ public final class OutlineRenderer {
                 c == int.class || c == Integer.class || c == long.class || c == Long.class;
     }
 
-    // build argument array for method with parameter types pts, mapping floats to required numeric types
     private static Object[] buildNumericArgs(Class<?>[] pts, float x, float y, float z, float r, float g, float b, float a) {
         Object[] args = new Object[pts.length];
         for (int i = 0; i < pts.length; i++) {
-            Class<?> t = pts[i];
             float val = 0f;
             if (i == 0) val = x;
             else if (i == 1) val = y;
@@ -298,12 +500,11 @@ public final class OutlineRenderer {
             else if (i == 4) val = g;
             else if (i == 5) val = b;
             else if (i == 6) val = a;
-            else val = 0f;
-
+            Class<?> t = pts[i];
             if (t == float.class || t == Float.class) args[i] = val;
             else if (t == double.class || t == Double.class) args[i] = (double) val;
-            else if (t == int.class || t == Integer.class) args[i] = (int) val;
-            else if (t == long.class || t == Long.class) args[i] = (long) val;
+            else if (t == int.class || t == Integer.class) args[i] = (int) Math.round(val * 255f);
+            else if (t == long.class || t == Long.class) args[i] = (long) Math.round(val);
             else args[i] = val;
         }
         return args;
