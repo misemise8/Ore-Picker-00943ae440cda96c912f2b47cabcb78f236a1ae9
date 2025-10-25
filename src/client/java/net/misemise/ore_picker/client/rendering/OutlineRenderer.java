@@ -14,26 +14,30 @@ import net.minecraft.util.math.Vec3d;
 import org.lwjgl.opengl.GL11;
 
 import java.lang.reflect.Method;
-import java.util.Set;
+import java.util.*;
 
 /**
- * OutlineRenderer - provider.getBuffer() を使う安定版
+ * OutlineRenderer - エッジを2パスで描画するシンプル版
  *
- * - provider.getBuffer(RenderLayer.getLines()) で VertexConsumer を取得して発行
- * - 2 パス（base: 太め半透明 GL_GREATER / top: 細め不透明 GL_LEQUAL）
- * - デバッグログは短時間間隔で抑制
- * - 発行は反射ベースの robust emitter（いろんな VertexConsumer 実装に対応）
+ * Pass A (透け表示): depthFunc = GL_GREATER, depthMask = false, alpha = 半透明
+ * Pass B (前面白線): depthFunc = GL_LEQUAL, depthMask = true, alpha = 不透明
+ *
+ * VertexConsumer への呼び出しは反射で互換性を保つ（キャッシュあり）。
  */
 public final class OutlineRenderer {
     private OutlineRenderer() {}
 
-    private static final float BASE_R = 0f, BASE_G = 0f, BASE_B = 0f, BASE_A = 0.55f;
-    private static final float TOP_R  = 1f, TOP_G  = 1f, TOP_B  = 1f, TOP_A  = 1f;
-    private static final float BASE_HALF_WIDTH = 0.04f;
-    private static final float TOP_HALF_WIDTH  = 0.008f;
+    private static final float PASS_A_R = 0f, PASS_A_G = 0f, PASS_A_B = 0f, PASS_A_A = 0.45f; // 奥に見える薄い下地
+    private static final float PASS_B_R = 1f, PASS_B_G = 1f, PASS_B_B = 1f, PASS_B_A = 1f;      // 手前の白線
 
-    private static final long LOG_MIN_INTERVAL_MS = 250;
+    private static final double MAX_DRAW_DISTANCE = 48.0;
+    private static final double MAX_DRAW_DISTANCE_SQ = MAX_DRAW_DISTANCE * MAX_DRAW_DISTANCE;
+
+    private static final long LOG_MIN_INTERVAL_MS = 300;
     private static long lastLogTime = 0L;
+
+    // class -> discovered methods cache
+    private static final Map<Class<?>, VCMethods> vcMethodsCache = new HashMap<>();
 
     public static void register() {
         try {
@@ -71,17 +75,15 @@ public final class OutlineRenderer {
             if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
                 if (now - lastLogTime >= LOG_MIN_INTERVAL_MS) {
                     lastLogTime = now;
-                    System.out.println("[OrePicker][OutlineRenderer DEBUG] selectedBlocks.size=" + set.size());
+                    System.out.println("[OrePicker][OutlineRenderer DEBUG] setSize=" + set.size());
                 }
             }
 
-            // provider 経由で VertexConsumer を取得（安全）
-            RenderLayer layer = RenderLayer.getLines();
+            // provider から VertexConsumer を取得（まず Lines）
             VertexConsumer vc;
             try {
-                vc = provider.getBuffer(layer);
-            } catch (Throwable t) {
-                // fallback: translucent
+                vc = provider.getBuffer(RenderLayer.getLines());
+            } catch (Throwable t1) {
                 try {
                     vc = provider.getBuffer(RenderLayer.getTranslucent());
                 } catch (Throwable t2) {
@@ -96,44 +98,38 @@ public final class OutlineRenderer {
                     return;
                 }
             }
+            if (vc == null) return;
 
-            if (vc == null) {
-                if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
-                    long tms = System.currentTimeMillis();
-                    if (tms - lastLogTime >= LOG_MIN_INTERVAL_MS) {
-                        lastLogTime = tms;
-                        System.out.println("[OrePicker][OutlineRenderer DEBUG] VertexConsumer is null");
-                    }
-                }
-                return;
-            }
-
-            // Matrix4f を MatrixStack から取得（反射で互換対応）
+            // Matrix4f 相当オブジェクトを取得（あれば利用）
             Object matrixObj = obtainMatrixFromMatrixStack(matrices);
-            if (matrixObj == null) {
+
+            // VC のメソッドをキャッシュして取得
+            VCMethods methods = vcMethodsCache.get(vc.getClass());
+            if (methods == null) {
+                methods = VCMethods.discover(vc);
+                vcMethodsCache.put(vc.getClass(), methods);
                 if (ConfigManager.INSTANCE != null && ConfigManager.INSTANCE.debug) {
-                    long tms = System.currentTimeMillis();
-                    if (tms - lastLogTime >= LOG_MIN_INTERVAL_MS) {
-                        lastLogTime = tms;
-                        System.out.println("[OrePicker][OutlineRenderer DEBUG] matrixObj == null");
-                    }
+                    System.out.println("[OrePicker][OutlineRenderer DEBUG] discovered VC methods for " + vc.getClass().getName());
                 }
-                // matrix が無い場合でも VertexConsumer に numeric vertex を投げて試す（続行）
             }
 
-            // ---------- パスA: base（太め・半透明） ----------
+            // ---------- PASS A: 透過（奥） ----------
             try {
                 RenderSystem.enableBlend();
+                RenderSystem.defaultBlendFunc();
                 GL11.glEnable(GL11.GL_DEPTH_TEST);
-                GL11.glDepthMask(false);           // depth buffer へ書き込まない
-                GL11.glDepthFunc(GL11.GL_GREATER); // 奥にあるものにも描画 -> 透けて見える効果
+                GL11.glDepthMask(false);
+                GL11.glDepthFunc(GL11.GL_GREATER); // 奥にあるピクセルにも描く
 
                 for (BlockPos bp : set) {
                     if (bp == null) continue;
-                    emitEdgesForBlock(vc, matrixObj, camPos, bp, BASE_HALF_WIDTH, BASE_R, BASE_G, BASE_B, BASE_A);
+                    // distance culling
+                    double cx = bp.getX() + 0.5, cy = bp.getY() + 0.5, cz = bp.getZ() + 0.5;
+                    double dx = cx - camPos.x, dy = cy - camPos.y, dz = cz - camPos.z;
+                    if (dx*dx + dy*dy + dz*dz > MAX_DRAW_DISTANCE_SQ) continue;
+                    emitEdges(vc, matrixObj, camPos, bp, PASS_A_R, PASS_A_G, PASS_A_B, PASS_A_A);
                 }
 
-                // Immediate provider なら明示的に draw()
                 if (provider instanceof Immediate) {
                     try { ((Immediate) provider).draw(); } catch (Throwable ignored) {}
                 }
@@ -142,17 +138,16 @@ public final class OutlineRenderer {
                     long tms = System.currentTimeMillis();
                     if (tms - lastLogTime >= LOG_MIN_INTERVAL_MS) {
                         lastLogTime = tms;
-                        System.err.println("[OrePicker][OutlineRenderer DEBUG] base pass threw:");
+                        System.err.println("[OrePicker][OutlineRenderer DEBUG] pass A threw:");
                         t.printStackTrace();
                     }
                 }
             } finally {
-                // restore depth write then adjust for next pass
+                // restore depth write for next pass
                 GL11.glDepthMask(true);
-                GL11.glDepthFunc(GL11.GL_LEQUAL);
             }
 
-            // ---------- パスB: top（細め・不透明） ----------
+            // ---------- PASS B: 前面白線 ----------
             try {
                 GL11.glEnable(GL11.GL_DEPTH_TEST);
                 GL11.glDepthMask(true);
@@ -160,7 +155,10 @@ public final class OutlineRenderer {
 
                 for (BlockPos bp : set) {
                     if (bp == null) continue;
-                    emitEdgesForBlock(vc, matrixObj, camPos, bp, TOP_HALF_WIDTH, TOP_R, TOP_G, TOP_B, TOP_A);
+                    double cx = bp.getX() + 0.5, cy = bp.getY() + 0.5, cz = bp.getZ() + 0.5;
+                    double dx = cx - camPos.x, dy = cy - camPos.y, dz = cz - camPos.z;
+                    if (dx*dx + dy*dy + dz*dz > MAX_DRAW_DISTANCE_SQ) continue;
+                    emitEdges(vc, matrixObj, camPos, bp, PASS_B_R, PASS_B_G, PASS_B_B, PASS_B_A);
                 }
 
                 if (provider instanceof Immediate) {
@@ -171,7 +169,7 @@ public final class OutlineRenderer {
                     long tms = System.currentTimeMillis();
                     if (tms - lastLogTime >= LOG_MIN_INTERVAL_MS) {
                         lastLogTime = tms;
-                        System.err.println("[OrePicker][OutlineRenderer DEBUG] top pass threw:");
+                        System.err.println("[OrePicker][OutlineRenderer DEBUG] pass B threw:");
                         t.printStackTrace();
                     }
                 }
@@ -185,7 +183,7 @@ public final class OutlineRenderer {
                 long tms = System.currentTimeMillis();
                 if (tms - lastLogTime >= LOG_MIN_INTERVAL_MS) {
                     lastLogTime = tms;
-                    System.out.println("[OrePicker][OutlineRenderer DEBUG] rendered two passes.");
+                    System.out.println("[OrePicker][OutlineRenderer DEBUG] rendered two-pass outline (setSize=" + set.size() + ")");
                 }
             }
         } catch (Throwable t) {
@@ -200,63 +198,51 @@ public final class OutlineRenderer {
         }
     }
 
-    // ブロックの 12 エッジを emit（頂点は robust emitter に任せる）
-    private static void emitEdgesForBlock(VertexConsumer vc, Object matrixObj, Vec3d camPos, BlockPos bp,
-                                          float halfWidth, float r, float g, float b, float a) {
+    // ブロックの 12 エッジを emit（オフセット無し・エッジそのものを描く）
+    private static void emitEdges(VertexConsumer vc, Object matrixObj, Vec3d camPos, BlockPos bp,
+                                  float r, float g, float b, float a) {
         double x = bp.getX(), y = bp.getY(), z = bp.getZ();
         Box box = new Box(x, y, z, x + 1.0, y + 1.0, z + 1.0);
+
         float minX = (float) box.minX, minY = (float) box.minY, minZ = (float) box.minZ;
         float maxX = (float) box.maxX, maxY = (float) box.maxY, maxZ = (float) box.maxZ;
 
-        float[][] edges = new float[][]{
-                {minX, minY, minZ, maxX, minY, minZ},
-                {minX, maxY, minZ, maxX, maxY, minZ},
-                {minX, minY, maxZ, maxX, minY, maxZ},
-                {minX, maxY, maxZ, maxX, maxY, maxZ},
+        float[][] edges = new float[][] {
+                { minX, minY, minZ, maxX, minY, minZ },
+                { minX, maxY, minZ, maxX, maxY, minZ },
+                { minX, minY, maxZ, maxX, minY, maxZ },
+                { minX, maxY, maxZ, maxX, maxY, maxZ },
 
-                {minX, minY, minZ, minX, maxY, minZ},
-                {maxX, minY, minZ, maxX, maxY, minZ},
-                {minX, minY, maxZ, minX, maxY, maxZ},
-                {maxX, minY, maxZ, maxX, maxY, maxZ},
+                { minX, minY, minZ, minX, maxY, minZ },
+                { maxX, minY, minZ, maxX, maxY, minZ },
+                { minX, minY, maxZ, minX, maxY, maxZ },
+                { maxX, minY, maxZ, maxX, maxY, maxZ },
 
-                {minX, minY, minZ, minX, minY, maxZ},
-                {maxX, minY, minZ, maxX, minY, maxZ},
-                {minX, maxY, minZ, minX, maxY, maxZ},
-                {maxX, maxY, minZ, maxX, maxY, maxZ}
+                { minX, minY, minZ, minX, minY, maxZ },
+                { maxX, minY, minZ, maxX, minY, maxZ },
+                { minX, maxY, minZ, minX, maxY, maxZ },
+                { maxX, maxY, minZ, maxX, maxY, maxZ }
         };
 
-        float camX = (float) camPos.x;
-        float camY = (float) camPos.y;
-        float camZ = (float) camPos.z;
+        float camX = (float) camPos.x, camY = (float) camPos.y, camZ = (float) camPos.z;
 
         for (float[] e : edges) {
             float x1 = e[0] - camX, y1 = e[1] - camY, z1 = e[2] - camZ;
             float x2 = e[3] - camX, y2 = e[4] - camY, z2 = e[5] - camZ;
-
-            if (halfWidth > 0f) {
-                float dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
-                float mag = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
-                if (mag != 0f) {
-                    float nx = dx / mag, ny = dy / mag, nz = dz / mag;
-                    float ox = -nz * halfWidth, oy = 0f, oz = nx * halfWidth;
-                    x1 -= ox; y1 -= oy; z1 -= oz;
-                    x2 += ox; y2 += oy; z2 += oz;
-                }
-            }
-
-            emitLineRobust(vc, matrixObj, x1, y1, z1, x2, y2, z2, r, g, b, a);
+            // 頂点ペアを robust emitter に投げる
+            emitPairRobust(vc, matrixObj, x1, y1, z1, x2, y2, z2, r, g, b, a);
         }
     }
 
-    // robust emitter: VertexConsumer によらずいろんな実装に対応して頂点を投げる
-    private static boolean emitLineRobust(VertexConsumer vc, Object matrixObj,
+    // robust emitter - matrix-aware or numeric or multi-arg を試す
+    private static boolean emitPairRobust(VertexConsumer vc, Object matrixObj,
                                           float x1, float y1, float z1,
                                           float x2, float y2, float z2,
                                           float r, float g, float b, float a) {
         if (vc == null) return false;
         try {
             Class<?> cls = vc.getClass();
-            // try matrix-aware signature: vertex(Matrix4f, float, float, float)
+            // matrix-aware
             if (matrixObj != null) {
                 for (Method m : cls.getMethods()) {
                     if (m.getParameterCount() == 4) {
@@ -278,7 +264,7 @@ public final class OutlineRenderer {
             }
         } catch (Throwable ignored) {}
 
-        // fallback: numeric vertex(x,y,z)
+        // numeric 3-arg
         try {
             Class<?> cls = vc.getClass();
             for (Method m : cls.getMethods()) {
@@ -369,6 +355,7 @@ public final class OutlineRenderer {
         return false;
     }
 
+    // obtain matrix4f-like from MatrixStack.peek()
     private static Object obtainMatrixFromMatrixStack(MatrixStack matrices) {
         try {
             Object entry = matrices.peek();
@@ -409,5 +396,66 @@ public final class OutlineRenderer {
             else args[i] = val;
         }
         return args;
+    }
+
+    // VCMethods simple container (discovery used earlier in your trials)
+    private static class VCMethods {
+        Method vertexMatrix; // (Matrix4f, float, float, float)
+        Method vertexXYZ;    // (float, float, float)
+        Method multiVertex;  // any multi-arg pos+...
+        Method colorInt;     // (int,int,int,int)
+        Method colorFloat;   // (float,float,float,float)
+        Method end;          // endVertex / next / emit
+
+        static VCMethods discover(VertexConsumer vc) {
+            VCMethods m = new VCMethods();
+            Class<?> cls = vc.getClass();
+            for (Method mm : cls.getMethods()) {
+                String name = mm.getName().toLowerCase();
+                Class<?>[] pts = mm.getParameterTypes();
+                // matrix-aware
+                if (pts.length == 4) {
+                    try {
+                        Class<?> c0 = pts[0];
+                        if (c0.getName().toLowerCase().contains("matrix") && isNumeric(pts[1]) && isNumeric(pts[2]) && isNumeric(pts[3])) {
+                            m.vertexMatrix = mm;
+                        }
+                    } catch (Throwable ignored) {}
+                }
+                // numeric 3-arg
+                if (pts.length == 3 && isNumeric(pts[0]) && isNumeric(pts[1]) && isNumeric(pts[2])) {
+                    m.vertexXYZ = mm;
+                }
+                // multi-arg fallback
+                if (pts.length >= 3 && isNumeric(pts[0]) && isNumeric(pts[1]) && isNumeric(pts[2])) {
+                    String nm = mm.getName().toLowerCase();
+                    if (nm.contains("vertex") || nm.contains("pos") || nm.contains("put") || nm.contains("add")) {
+                        m.multiVertex = mm;
+                    }
+                }
+                // color int
+                if (pts.length == 4 && (pts[0] == int.class || pts[0] == Integer.class)) {
+                    String nm = name;
+                    if (nm.contains("color") || nm.contains("method_1336") || nm.contains("method_22915")) {
+                        m.colorInt = mm;
+                    }
+                }
+                // color float
+                if (pts.length == 4 && isNumeric(pts[0]) && isNumeric(pts[1]) && isNumeric(pts[2]) && isNumeric(pts[3])) {
+                    String nm = name;
+                    if (nm.contains("color") || nm.contains("method_22915")) {
+                        m.colorFloat = mm;
+                    }
+                }
+                // end
+                if (mm.getParameterCount() == 0) {
+                    String nm = name;
+                    if (nm.equals("endvertex") || nm.equals("next") || nm.equals("emit") || nm.equals("end") || nm.equals("nextvertex")) {
+                        m.end = mm;
+                    }
+                }
+            }
+            return m;
+        }
     }
 }
